@@ -1,0 +1,95 @@
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+
+# ========================
+# Deep Learning / ML
+# ========================
+# Model weights (too large for git)
+*.pth
+*.pt
+*.onnx
+*.tflite
+*.h5
+*.pb
+*.caffemodel
+*.weights
+# Exception: keep small config files
+!configs/**
+
+# ========================
+# Data
+# ========================
+data/raw/
+data/processed/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wav
+*.mp3
+# Keep sample/demo data
+!data/samples/
+
+# ========================
+# IDE & Editor
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ========================
+# OS Generated
+# ========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========================
+# Jupyter Notebook
+# ========================
+.ipynb_checkpoints/
+
+# ========================
+# Logs & Outputs
+# ========================
+logs/
+runs/
+outputs/
+*.log
+wandb/
+
+# ========================
+# Documents (原始文档保留在 docs/ 中)
+# ========================
+# 毕业设计文档（Word/PPT 等大文件建议用 Git LFS 或不跟踪）
+# 如需跟踪请注释下面的规则
+# *.docx
+# *.doc
+# *.pptx
+# *.pdf
+
+# ========================
+# Environment & Secrets
+# ========================
+.env
+*.env
+secrets.yaml

@@ -1,0 +1,44 @@
+# 基于深度学习的人体动作矫正系统 - 默认配置
+
+project:
+  name: "Human Action Correction System"
+  version: "0.1.0"
+  author: "张玉倍"
+  student_id: "U202215369"
+
+# 姿态估计配置
+pose_estimation:
+  backend: "mediapipe"          # mediapipe / openpose
+  model_complexity: 1           # 0: Lite, 1: Full, 2: Heavy
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5
+  enable_segmentation: false
+
+# 动作对比配置
+action_comparison:
+  algorithm: "dtw"              # dtw / fastdtw / ddtw
+  distance_metric: "euclidean"  # euclidean / cosine / manhattan
+  window_size: null             # Sakoe-Chiba 带宽约束，null 表示不限制
+  threshold: 0.3                # 动作相似度阈值
+
+# 摄像头配置
+camera:
+  device_id: 0
+  width: 640
+  height: 480
+  fps: 30
+
+# 深度学习模型配置
+model:
+  backbone: "resnet50"
+  pretrained: true
+  num_classes: 10               # 动作类别数
+  learning_rate: 0.001
+  batch_size: 32
+  epochs: 100
+
+# 输出与日志
+output:
+  save_dir: "outputs/"
+  log_dir: "logs/"
+  visualization: true
