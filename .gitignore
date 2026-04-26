@@ -93,3 +93,4 @@ wandb/
 .env
 *.env
 secrets.yaml
+dist 
