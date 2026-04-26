@@ -37,6 +37,34 @@ model:
   batch_size: 32
   epochs: 100
 
+# 标准动作模板配置
+actions:
+  templates_dir: "data/templates"      # 模板存储根目录
+  default_target_frames: 60            # 默认归一化帧数
+  categories:
+    squat:
+      display_name: "深蹲"
+      description: "标准深蹲动作 — 双脚与肩同宽，臀部下沉至大腿与地面平行"
+    arm_raise:
+      display_name: "举臂"
+      description: "标准举臂动作 — 双臂从体侧抬起至过头顶伸直"
+    side_bend:
+      display_name: "侧弯"
+      description: "标准侧弯动作 — 单手叉腰，另一侧手臂引导躯干侧向弯曲"
+    lunge:
+      display_name: "弓步"
+      description: "标准弓步动作 — 前腿屈膝90度，后腿膝盖接近地面"
+    standing_stretch:
+      display_name: "站立拉伸"
+      description: "标准站立拉伸 — 双臂上举，身体向上延伸"
+
+# 数据增强配置
+augmentation:
+  time_warp_range: [0.8, 1.2]          # 时间拉伸/压缩范围
+  noise_std: 0.005                     # 高斯噪声标准差
+  mirror_enabled: true                 # 是否启用左右镜像
+  augment_per_template: 5              # 每个模板生成的增强样本数
+
 # 输出与日志
 output:
   save_dir: "outputs/"
