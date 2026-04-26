@@ -1,14 +1,14 @@
 ## 1. 基础设施与数据类型
 
-- [ ] 1.1 实现 `src/utils/config.py` — YAML 配置加载工具，支持从 `configs/default.yaml` 读取配置并提供字典式访问。验证：能正确加载并返回 pose_estimation 配置段
-- [ ] 1.2 实现 `src/pose_estimation/data_types.py` — 定义 PoseLandmark、PoseFrame、PoseSequence 三个 dataclass，包含 to_numpy() 方法。验证：PoseFrame.to_numpy() 返回 (33, 4) 数组，PoseSequence.to_numpy() 返回 (T, 33, 4) 数组
-- [ ] 1.3 实现 PoseSequence 的 save/load 方法 — 支持 .npy 和 .json 两种格式的序列化/反序列化。验证：保存后再加载，数据完全一致（误差 < 1e-6）
+- [x] 1.1 实现 `src/utils/config.py` — YAML 配置加载工具，支持从 `configs/default.yaml` 读取配置并提供字典式访问。验证：能正确加载并返回 pose_estimation 配置段
+- [x] 1.2 实现 `src/pose_estimation/data_types.py` — 定义 PoseLandmark、PoseFrame、PoseSequence 三个 dataclass，包含 to_numpy() 方法。验证：PoseFrame.to_numpy() 返回 (33, 4) 数组，PoseSequence.to_numpy() 返回 (T, 33, 4) 数组
+- [x] 1.3 实现 PoseSequence 的 save/load 方法 — 支持 .npy 和 .json 两种格式的序列化/反序列化。验证：保存后再加载，数据完全一致（误差 < 1e-6）
 
 ## 2. 视频输入管理
 
-- [ ] 2.1 实现 `src/pose_estimation/video_source.py` — VideoSource 抽象基类 + CameraSource 和 FileSource 两个实现。验证：CameraSource 能打开摄像头，FileSource 能打开视频文件并返回正确帧率
-- [ ] 2.2 实现上下文管理器协议 — VideoSource 支持 with 语句自动资源释放。验证：with 块退出后摄像头/文件资源被正确释放
-- [ ] 2.3 实现视频元数据访问 — fps、width、height、total_frames 属性。验证：FileSource 返回与 OpenCV 查询一致的元数据值
+- [x] 2.1 实现 `src/pose_estimation/video_source.py` — VideoSource 抽象基类 + CameraSource 和 FileSource 两个实现。验证：CameraSource 能打开摄像头，FileSource 能打开视频文件并返回正确帧率
+- [x] 2.2 实现上下文管理器协议 — VideoSource 支持 with 语句自动资源释放。验证：with 块退出后摄像头/文件资源被正确释放
+- [x] 2.3 实现视频元数据访问 — fps、width、height、total_frames 属性。验证：FileSource 返回与 OpenCV 查询一致的元数据值
 
 ## 3. 姿态估计核心
 
