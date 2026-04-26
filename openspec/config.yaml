@@ -1,20 +1,60 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context
+context: |
+  ## 项目信息
+  - 项目名称: 基于深度学习的人体动作矫正系统
+  - 作者: CS2201 张玉倍 U202215369
+  - 项目性质: 本科毕业设计
+  
+  ## 技术栈
+  - 语言: Python >= 3.9
+  - 姿态估计: MediaPipe (主选) / OpenPose (备选)
+  - 深度学习框架: PyTorch >= 2.0
+  - 动作对比: DTW (dtw-python, fastdtw), 支持经典DTW/FastDTW/DerivativeDTW
+  - 计算机视觉: OpenCV >= 4.8
+  - 数据处理: NumPy, Pandas, SciPy, scikit-learn
+  - 可视化: Matplotlib, Seaborn
+  - 前端/UI: Streamlit 或 Gradio (待定)
+  - 配置管理: PyYAML
+  - GPU: CUDA >= 11.8 (可选)
+  
+  ## 系统架构 (模块化设计)
+  - src/pose_estimation/ — 姿态估计模块：基于MediaPipe提取人体33个骨骼关键点
+  - src/action_comparison/ — 动作对比模块：DTW时间序列相似度度量，支持不等长序列
+  - src/correction/ — 动作矫正与反馈模块：检测偏差并生成矫正建议
+  - src/models/ — 深度学习模型：CNN/LSTM/Transformer用于动作特征提取与分类
+  - src/utils/ — 工具函数：数据预处理、可视化、配置加载等
+  - src/app/ — 应用入口与UI：实时视频流处理与交互界面
+  
+  ## 核心流程
+  1. 视频输入 → MediaPipe姿态估计 → 骨骼关键点序列
+  2. 关键点序列 → 特征工程(角度/距离/速度) → 动作特征向量
+  3. 特征向量 → DTW对比标准动作 → 相似度评分
+  4. 偏差检测 → 矫正建议生成 → 可视化反馈
+  
+  ## 参考文献核心要点
+  - MediaPipe论文: 图计算框架,Calculator节点,流处理,GPU支持,跨平台部署
+  - DTW综述: 经典DTW(O(n²)), FastDTW(线性), DerivativeDTW, SegmentedDTW, WeightedDTW
+  - ASD运动分析综述: OpenPose/MediaPipe姿态估计, CNN-LSTM时空特征, 双流网络, 3D姿态重建
+  
+  ## 编码规范
+  - 使用中文注释和文档
+  - 遵循PEP 8风格
+  - 模块间通过配置文件解耦
+  - 所有配置存放于 configs/ 目录
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+# Per-artifact rules
+rules:
+  proposal:
+    - 提案应明确模块边界和接口设计
+    - 包含技术选型理由(基于参考文献)
+    - 标注预计开发时间
+  design:
+    - 设计文档需包含数据流图
+    - 明确输入输出格式
+    - 考虑性能和实时性要求
+  tasks:
+    - 每个任务控制在2-4小时工作量
+    - 任务需包含验证标准
+    - 优先实现可演示的最小功能
