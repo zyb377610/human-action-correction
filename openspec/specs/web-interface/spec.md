@@ -1,0 +1,56 @@
+# web-interface Specification
+
+## Purpose
+TBD - created by archiving change web-ui-integration. Update Purpose after archive.
+## Requirements
+### Requirement: Gradio 多 Tab 布局
+系统 SHALL 提供基于 Gradio Blocks 的 Web 界面，包含 4 个 Tab 页签：视频分析、实时模式、模板管理、系统说明。
+
+#### Scenario: 启动后显示所有 Tab
+- **WHEN** 用户访问 Web 界面
+- **THEN** 界面显示 4 个 Tab，默认激活"视频分析"Tab
+
+### Requirement: 视频上传分析
+系统 SHALL 支持用户上传视频文件（mp4/avi/mov），执行完整的姿态估计 → 动作分类 → DTW 对比 → 矫正报告流程。
+
+#### Scenario: 上传视频并自动分析
+- **WHEN** 用户上传视频文件并点击"开始分析"
+- **THEN** 系统依次执行骨骼提取、动作分类、DTW 对比、矫正反馈，展示矫正报告文本、偏差柱状图、骨骼标注视频
+
+#### Scenario: 手动指定动作类型
+- **WHEN** 用户在下拉框选择特定动作类型（如"深蹲"）后上传视频
+- **THEN** 系统跳过自动分类，直接使用指定动作类型进行对比分析
+
+#### Scenario: 分析进度展示
+- **WHEN** 视频分析正在进行
+- **THEN** 界面显示当前步骤进度提示（1/4 → 4/4）
+
+### Requirement: 实时摄像头模式
+系统 SHALL 支持摄像头实时采集画面，实时叠加骨骼可视化，并在停止录制后自动执行矫正分析。
+
+#### Scenario: 实时骨骼叠加
+- **WHEN** 用户开启摄像头
+- **THEN** 界面实时显示带有骨骼连线标注的画面
+
+#### Scenario: 录制并分析
+- **WHEN** 用户点击"开始录制"后执行动作，再点击"停止并分析"
+- **THEN** 系统对录制期间采集的骨骼序列执行完整矫正分析并展示报告
+
+### Requirement: 模板管理
+系统 SHALL 提供模板管理界面，支持查看已有标准动作模板和从视频录入新模板。
+
+#### Scenario: 查看模板列表
+- **WHEN** 用户进入"模板管理"Tab
+- **THEN** 显示已有标准动作模板列表，包含动作类型、帧数、录入时间
+
+#### Scenario: 录入新模板
+- **WHEN** 用户上传视频并指定动作名称后点击"录入模板"
+- **THEN** 系统从视频提取骨骼序列并保存到模板库
+
+### Requirement: 系统说明页
+系统 SHALL 提供 Markdown 格式的系统说明页，包含系统介绍、使用指南和技术架构说明。
+
+#### Scenario: 查看系统说明
+- **WHEN** 用户进入"系统说明"Tab
+- **THEN** 显示系统概述、各 Tab 使用方法和技术架构图
+

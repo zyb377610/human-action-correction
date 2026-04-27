@@ -126,6 +126,7 @@ class CorrectionPipeline:
         self,
         user_sequence: PoseSequence,
         action_name: Optional[str] = None,
+        progress_callback=None,
     ) -> CorrectionReport:
         """
         执行端到端矫正分析
@@ -133,6 +134,7 @@ class CorrectionPipeline:
         Args:
             user_sequence: 用户动作序列
             action_name: 动作类别名称（None 则自动识别）
+            progress_callback: 进度回调 fn(step, total, message)，可选
 
         Returns:
             CorrectionReport
@@ -140,9 +142,15 @@ class CorrectionPipeline:
         Raises:
             ValueError: 模板库无数据或指定类别无模板
         """
+
+        def _progress(step: int, msg: str):
+            if progress_callback:
+                progress_callback(step, 4, msg)
+
         prediction = None
 
         # Step 1: 确定动作类别
+        _progress(1, "正在分析动作类型…")
         if action_name is None:
             # 自动模式
             predictor = self._get_predictor()
@@ -157,6 +165,7 @@ class CorrectionPipeline:
             logger.info(f"指定模式: {action_name}")
 
         # Step 2: 匹配模板
+        _progress(2, "正在匹配标准模板…")
         templates = self._library.load_all_templates(action_name)
         if not templates:
             raise ValueError(
@@ -165,6 +174,7 @@ class CorrectionPipeline:
             )
 
         # Step 3: DTW 对比（取最佳匹配模板）
+        _progress(3, "正在DTW对比分析…")
         comparison_results = self._comparator.compare_with_templates(
             user_sequence, self._library, action_name
         )
@@ -188,6 +198,7 @@ class CorrectionPipeline:
         )
 
         # Step 6: 生成反馈报告
+        _progress(4, "正在生成矫正报告…")
         report = self._feedback_generator.generate(
             action_name=action_name,
             deviation_report=deviation_report,
