@@ -16,7 +16,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # 默认配置文件路径
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yaml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default_config.yaml"
 
 
 class Config:
@@ -126,3 +126,53 @@ def get_config(config_path: Optional[str] = None) -> Config:
         _default_config = Config()
 
     return _default_config
+
+
+def load_config(path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    加载配置并返回字典，支持环境变量覆盖。
+
+    优先级（从高到低）：
+    1. 环境变量 HAC_CONFIG_PATH 指定的配置文件
+    2. 参数 path 指定的配置文件
+    3. 默认配置文件 configs/default_config.yaml
+
+    环境变量覆盖（可选）：
+    - HAC_TEMPLATES_DIR → paths.templates_dir
+    - HAC_MODEL_TYPE   → model.type
+    - HAC_SERVER_PORT  → server.port
+
+    Args:
+        path: 配置文件路径，为 None 时按优先级回退
+
+    Returns:
+        配置字典
+    """
+    # 优先使用环境变量指定的配置路径
+    env_path = os.environ.get("HAC_CONFIG_PATH")
+    config_path = env_path or path
+
+    config = get_config(config_path)
+    data = config.to_dict()
+
+    # 环境变量覆盖特定字段
+    env_overrides = {
+        "HAC_TEMPLATES_DIR": ("paths", "templates_dir"),
+        "HAC_MODEL_TYPE": ("model", "type"),
+        "HAC_SERVER_PORT": ("server", "port"),
+    }
+
+    for env_key, (section, field) in env_overrides.items():
+        env_val = os.environ.get(env_key)
+        if env_val is not None:
+            if section not in data:
+                data[section] = {}
+            # 尝试类型转换
+            if field == "port":
+                try:
+                    env_val = int(env_val)
+                except ValueError:
+                    pass
+            data[section][field] = env_val
+
+    return data

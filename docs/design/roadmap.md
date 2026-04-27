@@ -61,7 +61,7 @@
 
 ---
 
-### Phase 2: 标准动作数据采集与预处理 🔲 待规划
+### Phase 2: 标准动作数据采集与预处理 ✅ 已完成
 
 - **OpenSpec Change**: `standard-action-data`（待创建）
 - **目录**: `src/utils/`, `data/`, `scripts/`
@@ -78,7 +78,7 @@
 
 ---
 
-### Phase 3: DTW 动作对比模块 🔲 待规划
+### Phase 3: DTW 动作对比模块 ✅ 已完成
 
 - **OpenSpec Change**: `dtw-action-comparison`（待创建）
 - **目录**: `src/action_comparison/`
@@ -98,7 +98,7 @@
 
 ---
 
-### Phase 4: 深度学习动作分类模块 🔲 待规划
+### Phase 4: 深度学习动作分类模块 ✅ 已完成
 
 - **OpenSpec Change**: `dl-action-classifier`（待创建）
 - **目录**: `src/models/`
@@ -119,7 +119,7 @@
 
 ---
 
-### Phase 5: 动作矫正与反馈模块 🔲 待规划
+### Phase 5: 动作矫正与反馈模块 ✅ 已完成
 
 - **OpenSpec Change**: `correction-feedback`（待创建）
 - **目录**: `src/correction/`
@@ -135,7 +135,7 @@
 
 ---
 
-### Phase 6: 前端界面与实时展示 🔲 待规划
+### Phase 6: 前端界面与实时展示 ✅ 已完成
 
 - **OpenSpec Change**: `web-ui`（待创建）
 - **目录**: `src/app/`
@@ -152,7 +152,7 @@
 
 ---
 
-### Phase 7: 系统集成与优化 🔲 待规划
+### Phase 7: 系统集成与优化 ✅ 已完成
 
 - **OpenSpec Change**: `system-integration`（待创建）
 - **目录**: 全局
@@ -204,12 +204,12 @@ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ──▶ Phase 5 ──▶ Phase 6 
 | 任务书要求 | 对应 Phase | 对应 OpenSpec Change |
 |-----------|-----------|---------------------|
 | 姿态估计模块开发（MediaPipe） | Phase 1 | `pose-estimation-module` ✅ |
-| 标准动作数据采集与预处理 | Phase 2 | `standard-action-data` 🔲 |
-| DTW 动作对比算法实现 | Phase 3 | `dtw-action-comparison` 🔲 |
-| 深度学习动作分类模型训练 | Phase 4 | `dl-action-classifier` 🔲 |
-| 矫正反馈模块开发 | Phase 5 | `correction-feedback` 🔲 |
-| 前端界面与实时展示 | Phase 6 | `web-ui` 🔲 |
-| 系统集成测试 | Phase 7 | `system-integration` 🔲 |
+| 标准动作数据采集与预处理 | Phase 2 | `standard-action-data` ✅ |
+| DTW 动作对比算法实现 | Phase 3 | `dtw-action-comparison` ✅ |
+| 深度学习动作分类模型训练 | Phase 4 | `deep-learning-model` ✅ |
+| 矫正反馈模块开发 | Phase 5 | `correction-feedback` ✅ |
+| 前端界面与实时展示 | Phase 6 | `web-ui-integration` ✅ |
+| 系统集成测试 | Phase 7 | `system-integration` ✅ |
 
 ## 参考文献与模块映射
 

@@ -215,8 +215,8 @@ class TestConfig:
     def test_get_section(self):
         config = get_config()
         pose_cfg = config.get_section("pose_estimation")
-        assert "backend" in pose_cfg
-        assert pose_cfg["backend"] == "mediapipe"
+        assert "max_frames" in pose_cfg
+        assert pose_cfg["max_frames"] == 300
 
 
 # ===== IO 工具测试 =====

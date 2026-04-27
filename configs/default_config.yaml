@@ -1,0 +1,56 @@
+# ===================================================
+# 基于深度学习的人体动作矫正系统 — 默认配置
+# ===================================================
+
+# -------------------------
+# 路径配置
+# -------------------------
+paths:
+  templates_dir: data/templates          # 标准动作模板库目录
+  models_dir: models/checkpoints         # 深度学习模型权重目录
+  output_dir: outputs                    # 分析结果输出目录
+  pose_model_path: models/pose_landmarker_heavy.task  # MediaPipe 模型文件
+
+# -------------------------
+# 深度学习模型配置
+# -------------------------
+model:
+  type: bilstm                           # 模型类型: stgcn / bilstm / transformer
+  checkpoint: null                       # 模型权重路径; null = 无预训练模型（仅支持指定动作模式）
+  num_classes: 5                         # 动作类别数
+  input_dim: 4                           # 输入特征维度 (x, y, z, visibility)
+  num_joints: 33                         # 关键点数量 (MediaPipe)
+
+# -------------------------
+# 姿态估计配置
+# -------------------------
+pose_estimation:
+  max_frames: 300                        # 单次分析最大帧数
+  min_frames: 5                          # 最少有效帧数
+  confidence_threshold: 0.5              # 关键点置信度阈值
+
+# -------------------------
+# 动作对比配置
+# -------------------------
+comparison:
+  dtw_method: dtw_python                 # DTW 算法: dtw_python / fastdtw / scipy
+  distance_metric: euclidean             # 距离度量: euclidean / cosine / manhattan
+  deviation_threshold: 0.1               # 偏差阈值
+
+# -------------------------
+# 矫正反馈配置
+# -------------------------
+correction:
+  quality_excellent: 90                  # 优秀评分线
+  quality_good: 70                       # 良好评分线
+  quality_fair: 50                       # 需改进评分线
+  max_suggestions: 10                    # 最大建议条数
+
+# -------------------------
+# Web 服务配置
+# -------------------------
+server:
+  port: 7860                             # 服务端口
+  host: "0.0.0.0"                        # 监听地址
+  share: false                           # 是否生成公网分享链接
+  show_error: true                       # 是否在界面显示错误详情
