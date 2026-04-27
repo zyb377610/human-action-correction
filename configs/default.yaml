@@ -30,12 +30,25 @@ camera:
 
 # 深度学习模型配置
 model:
-  backbone: "resnet50"
-  pretrained: true
-  num_classes: 10               # 动作类别数
+  backbone_type: "bilstm"         # stgcn / bilstm / transformer
+  num_classes: 5                  # 动作类别数（与 actions.categories 一致）
+  input_dim: 20                   # 特征向量维度（角度8 + 骨骼比12）
+  hidden_dim: 128                 # 隐藏层维度
+  num_layers: 2                   # 网络层数
+  num_heads: 4                    # 注意力头数（Transformer 用）
+  dropout: 0.3                    # Dropout 比率
+  num_joints: 33                  # 关键点数量
+  in_channels: 4                  # 输入通道数（x, y, z, visibility）
+  target_frames: 60               # 序列统一长度
   learning_rate: 0.001
+  weight_decay: 0.0001            # AdamW 权重衰减
   batch_size: 32
   epochs: 100
+  patience: 10                    # 早停耐心值
+  lambda_quality: 0.5             # 质量评分损失权重
+  seed: 42                        # 随机种子
+  input_mode: "keypoints"         # keypoints / features
+  checkpoint_dir: "outputs/checkpoints"
 
 # 标准动作模板配置
 actions:
