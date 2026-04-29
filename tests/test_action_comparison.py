@@ -119,9 +119,9 @@ class TestDistanceMetrics:
             get_distance_func("invalid")
 
     def test_sequence_to_feature_matrix(self, seq_a):
-        """默认使用 12 个核心关节点，输出 (T, 36)"""
+        """默认使用 17 个核心关节点，输出 (T, 51)"""
         matrix = sequence_to_feature_matrix(seq_a)
-        assert matrix.shape == (20, 36)  # 12 核心关节 × 3
+        assert matrix.shape == (20, 51)  # 17 核心关节 × 3
 
     def test_sequence_to_feature_matrix_all_joints(self, seq_a):
         """使用全部 33 个关节点时，输出 (T, 99)"""

@@ -10,32 +10,41 @@ import numpy as np
 
 
 # ===== 核心关节点索引 =====
-# 从 MediaPipe 33 个关键点中筛选 12 个运动核心关节点，
-# 去掉头部（0-10）、手指（17-22）、脚趾（29-32）等噪声点。
-# 这些核心关节直接决定动作质量，用于 DTW 比对时效果更好。
+# 从 MediaPipe 33 个关键点中筛选 17 个关键骨骼点用于 DTW 比对。
+# 包含：头部参考点(1) + 上肢(6) + 躯干(4) + 下肢(6) = 17 个
+# 去掉眼睛(1-4)、耳朵(7-8)、嘴角(9-10)、小指/拇指(19-22)等
+# 高抖动低信息量的点，保留运动分析核心骨骼。
 CORE_JOINT_INDICES = [
-    11,  # left_shoulder
-    12,  # right_shoulder
-    13,  # left_elbow
-    14,  # right_elbow
-    15,  # left_wrist
-    16,  # right_wrist
-    23,  # left_hip
-    24,  # right_hip
-    25,  # left_knee
-    26,  # right_knee
-    27,  # left_ankle
-    28,  # right_ankle
+    0,   # nose          — 头部朝向参考
+    11,  # left_shoulder  — 左肩
+    12,  # right_shoulder — 右肩
+    13,  # left_elbow     — 左肘
+    14,  # right_elbow    — 右肘
+    15,  # left_wrist     — 左腕
+    16,  # right_wrist    — 右腕
+    23,  # left_hip       — 左髋
+    24,  # right_hip      — 右髋
+    25,  # left_knee      — 左膝
+    26,  # right_knee     — 右膝
+    27,  # left_ankle     — 左踝
+    28,  # right_ankle    — 右踝
+    29,  # left_heel      — 左脚跟
+    30,  # right_heel     — 右脚跟
+    31,  # left_foot_index  — 左脚尖
+    32,  # right_foot_index — 右脚尖
 ]
 
 # 核心关节点中文名称
 CORE_JOINT_NAMES = {
+    0: "鼻子",
     11: "左肩", 12: "右肩",
     13: "左肘", 14: "右肘",
     15: "左腕", 16: "右腕",
     23: "左髋", 24: "右髋",
     25: "左膝", 26: "右膝",
     27: "左踝", 28: "右踝",
+    29: "左脚跟", 30: "右脚跟",
+    31: "左脚尖", 32: "右脚尖",
 }
 
 
