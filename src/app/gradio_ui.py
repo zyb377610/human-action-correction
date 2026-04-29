@@ -335,15 +335,20 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
 
     def on_record_template(video, action_input):
         if video is None:
-            return "⚠️ 请上传视频文件"
+            return "⚠️ 请上传视频文件", gr.update(), gr.update()
         if not action_input or not action_input.strip():
-            return "⚠️ 请输入动作名称"
+            return "⚠️ 请输入动作名称", gr.update(), gr.update()
         action_name = action_input.strip()
         success = pipeline.record_template(video, action_name)
         if success:
             session.refresh_action_list()
-            return f"✅ 模板录入成功: {action_name}"
-        return "❌ 模板录入失败，请检查视频是否包含有效的人体姿态"
+            new_choices = session.get_action_choices()
+            return (
+                f"✅ 模板录入成功: {action_name}",
+                gr.update(choices=new_choices),
+                gr.update(choices=new_choices),
+            )
+        return "❌ 模板录入失败", gr.update(), gr.update()
 
     # -- 模板管理：摄像头录制模板 --
 
@@ -374,6 +379,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 "⚠️ 请先输入动作名称",
                 gr.update(interactive=True),
                 gr.update(interactive=False),
+                gr.update(), gr.update(),
             )
 
         sequence = session.stop_recording()
@@ -383,6 +389,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 "⚠️ 录制帧数不足（至少 5 帧），请确保全身在画面中",
                 gr.update(interactive=True),
                 gr.update(interactive=False),
+                gr.update(), gr.update(),
             )
 
         action_name = action_input.strip()
@@ -416,11 +423,14 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         pipeline.template_library.add_template(action_name, seq, template_name)
         session.finish_analysis()
         session.refresh_action_list()
+        new_choices = session.get_action_choices()
 
         return (
             f"✅ 模板录入成功: {action_name}/{template_name} ({sequence.shape[0]} 帧)",
             gr.update(interactive=True),
             gr.update(interactive=False),
+            gr.update(choices=new_choices),
+            gr.update(choices=new_choices),
         )
 
     # ================================================================
@@ -750,7 +760,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             upload_btn.click(
                 fn=on_record_template,
                 inputs=[tpl_video, tpl_name_input],
-                outputs=[upload_status],
+                outputs=[upload_status, vid_action_dropdown, rt_action_dropdown],
             )
 
             # 摄像头录制模板
@@ -768,7 +778,10 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             tpl_cam_stop.click(
                 fn=on_tpl_stop_recording,
                 inputs=[tpl_name_input],
-                outputs=[tpl_cam_status, tpl_cam_start, tpl_cam_stop],
+                outputs=[
+                    tpl_cam_status, tpl_cam_start, tpl_cam_stop,
+                    vid_action_dropdown, rt_action_dropdown,
+                ],
             )
 
         # ============================================================

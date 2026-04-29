@@ -24,6 +24,11 @@
       "display_name": "站立拉伸",
       "description": "",
       "template_count": 1
+    },
+    "test_clap": {
+      "display_name": "test_clap",
+      "description": "",
+      "template_count": 1
     }
   }
 }
