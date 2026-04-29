@@ -28,7 +28,8 @@ from .session import SessionManager, RecordingState
 logger = logging.getLogger(__name__)
 
 # 实时模式性能参数
-_PROCESS_WIDTH = 480   # 推理用缩放宽度
+_PROCESS_WIDTH = 320   # 推理用缩放宽度（越小越快）
+_DISPLAY_WIDTH = 480   # 返回给前端的显示宽度（降低传输量）
 
 # 算法下拉框选项标签列表
 _ALGO_LABELS = [label for label, _ in ALGORITHM_CHOICES]
@@ -61,15 +62,30 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         return None if action_choice == "自动识别" else action_choice
 
     def _scale_frame(frame: np.ndarray):
-        """缩放帧用于推理"""
+        """缩放帧用于推理，返回 (缩小帧, 缩放比例)"""
         if frame is None:
             return frame, 1.0
         h, w = frame.shape[:2]
         if w > _PROCESS_WIDTH:
             scale = _PROCESS_WIDTH / w
-            small = cv2.resize(frame, (int(w * scale), int(h * scale)))
+            small = cv2.resize(frame, (int(w * scale), int(h * scale)),
+                               interpolation=cv2.INTER_AREA)
             return small, scale
         return frame, 1.0
+
+    def _shrink_for_display(image: np.ndarray) -> np.ndarray:
+        """
+        缩小图像用于前端显示，降低 Gradio 传输数据量。
+        这是提升帧率的关键优化。
+        """
+        if image is None:
+            return image
+        h, w = image.shape[:2]
+        if w > _DISPLAY_WIDTH:
+            scale = _DISPLAY_WIDTH / w
+            return cv2.resize(image, (int(w * scale), int(h * scale)),
+                              interpolation=cv2.INTER_AREA)
+        return image
 
     # ================================================================
     # Tab 1 回调：视频分析
@@ -109,10 +125,11 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         """视频分析 Tab — 摄像头录制：逐帧处理"""
         if frame is None:
             return None
-        processed = pipeline.process_camera_frame(frame)
+        small, _ = _scale_frame(frame)
+        processed = pipeline.process_camera_frame(small)
         if session.is_recording and processed.has_pose:
             session.add_frame(processed.landmarks)
-        return processed.annotated_image
+        return _shrink_for_display(processed.annotated_image)
 
     def on_stop_cam_recording(action_choice, algo_label):
         """视频分析 Tab — 摄像头录制：停止并分析"""
@@ -196,13 +213,15 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         - COUNTDOWN 状态：显示倒计时，不分析
         - REALTIME 状态：骨骼叠加 + 固定窗口 DTW + 实时建议
         - 其他状态：仅骨骼叠加
+
+        性能优化：直接用缩小后的图像返回前端，不放大回原尺寸，
+        减少 Gradio 传输数据量是提升帧率的关键。
         """
         if frame is None:
             return None, gr.update(), gr.update()
 
-        # 缩放
-        small, scale = _scale_frame(frame)
-        h, w = frame.shape[:2]
+        # 缩放用于推理（关键：不再放大回原尺寸）
+        small, _ = _scale_frame(frame)
 
         # ---- 倒计时状态 ----
         if session.is_countdown:
@@ -216,13 +235,10 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 status = f"⏱️ {num}..."
                 feedback_md = f"**倒计时: {num}** — 请准备好姿势"
 
-            # 骨骼叠加（倒计时期间也显示骨骼）
             processed = pipeline.process_camera_frame(small)
-            if processed.annotated_image is not None and scale != 1.0:
-                display = cv2.resize(processed.annotated_image, (w, h))
-            else:
-                display = processed.annotated_image if processed.annotated_image is not None else frame
-
+            display = _shrink_for_display(
+                processed.annotated_image if processed.annotated_image is not None else small
+            )
             return display, status, feedback_md
 
         # ---- 实时分析状态 ----
@@ -234,11 +250,9 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 small, frame_idx, expected_total
             )
 
-            # 缩放回原尺寸
-            if processed.annotated_image is not None and scale != 1.0:
-                display = cv2.resize(processed.annotated_image, (w, h))
-            else:
-                display = processed.annotated_image if processed.annotated_image is not None else frame
+            display = _shrink_for_display(
+                processed.annotated_image if processed.annotated_image is not None else small
+            )
 
             # 缓存 landmarks
             if processed.has_pose:
@@ -258,11 +272,9 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
 
         # ---- 空闲/其他状态 ----
         processed = pipeline.process_camera_frame(small)
-        if processed.annotated_image is not None and scale != 1.0:
-            display = cv2.resize(processed.annotated_image, (w, h))
-        else:
-            display = processed.annotated_image if processed.annotated_image is not None else frame
-
+        display = _shrink_for_display(
+            processed.annotated_image if processed.annotated_image is not None else small
+        )
         return display, gr.update(), gr.update()
 
     def on_stop_realtime(action_choice, algo_label):
@@ -455,6 +467,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 fn=on_cam_record_frame,
                 inputs=[cam_rec_input],
                 outputs=[cam_rec_display],
+                stream_every=0.1,  # 100ms 间隔，提升帧率
             )
             cam_rec_start.click(
                 fn=on_start_cam_recording,
@@ -554,6 +567,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 fn=on_realtime_frame,
                 inputs=[rt_cam_input],
                 outputs=[rt_cam_display, rt_status, rt_feedback],
+                stream_every=0.1,  # 100ms 间隔，提升帧率
             )
 
             # 开始按钮
