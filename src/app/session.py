@@ -54,10 +54,10 @@ class SessionManager:
         self._action_list: List[str] = []
 
         # 实时模式相关
-        self._countdown_start: float = 0.0  # 倒计时开始时间
-        self._countdown_duration: float = 3.0  # 倒计时时长（秒）
-        self._realtime_frame_index: int = 0  # 实时帧计数器
-        self._last_feedback = None  # 最新的 FeedbackSnapshot
+        self._countdown_total_frames: int = 30  # 倒计时帧数
+        self._countdown_frame_count: int = 0    # 已过帧数
+        self._realtime_frame_index: int = 0     # 实时帧计数器
+        self._last_feedback = None              # 最新的 FeedbackSnapshot
 
         # 初始加载模板列表
         self.refresh_action_list()
@@ -133,28 +133,53 @@ class SessionManager:
 
     # ----- 实时模式 -----
 
-    def start_countdown(self):
-        """开始倒计时（实时模式）"""
+    def start_countdown(self, countdown_frames: int = 30):
+        """
+        开始倒计时（实时模式）
+
+        基于帧计数而非时间：stream_every=0.1s 时，30帧 ≈ 3秒。
+        这样即使摄像头帧不均匀也能保证倒计时体验一致。
+
+        Args:
+            countdown_frames: 倒计时帧数（默认 30，约 3 秒）
+        """
         self._state = RecordingState.COUNTDOWN
-        self._countdown_start = time.time()
+        self._countdown_total_frames = countdown_frames
+        self._countdown_frame_count = 0
         self._frame_buffer.clear()
         self._realtime_frame_index = 0
         self._last_feedback = None
-        logger.info("实时模式：倒计时开始")
+        logger.info(f"实时模式：倒计时开始（{countdown_frames} 帧）")
+
+    def advance_countdown(self) -> int:
+        """
+        推进倒计时帧计数器
+
+        Returns:
+            倒计时剩余帧数
+        """
+        self._countdown_frame_count += 1
+        remaining = self._countdown_total_frames - self._countdown_frame_count
+        return max(0, remaining)
+
+    @property
+    def countdown_remaining_seconds(self) -> float:
+        """倒计时剩余秒数（估算，基于帧计数）"""
+        if self._state != RecordingState.COUNTDOWN:
+            return 0.0
+        remaining_frames = self._countdown_total_frames - self._countdown_frame_count
+        # 假设 ~10fps（stream_every=0.1）
+        return max(0.0, remaining_frames * 0.1)
 
     @property
     def countdown_remaining(self) -> float:
-        """倒计时剩余秒数"""
-        if self._state != RecordingState.COUNTDOWN:
-            return 0.0
-        elapsed = time.time() - self._countdown_start
-        remaining = self._countdown_duration - elapsed
-        return max(0.0, remaining)
+        """倒计时剩余秒数（兼容旧接口）"""
+        return self.countdown_remaining_seconds
 
     @property
     def countdown_finished(self) -> bool:
         """倒计时是否结束"""
-        return self.countdown_remaining <= 0.0
+        return self._countdown_frame_count >= self._countdown_total_frames
 
     def start_realtime(self):
         """倒计时结束后进入实时分析"""

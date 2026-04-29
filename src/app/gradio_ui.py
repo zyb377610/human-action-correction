@@ -223,17 +223,18 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         # 缩放用于推理（关键：不再放大回原尺寸）
         small, _ = _scale_frame(frame)
 
-        # ---- 倒计时状态 ----
+        # ---- 倒计时状态（帧驱动）----
         if session.is_countdown:
-            remaining = session.countdown_remaining
+            remaining_frames = session.advance_countdown()
             if session.countdown_finished:
                 session.start_realtime()
                 status = "🟢 开始跟做！"
                 feedback_md = "**实时分析已启动，请开始做动作…**"
             else:
-                num = math.ceil(remaining)
-                status = f"⏱️ {num}..."
-                feedback_md = f"**倒计时: {num}** — 请准备好姿势"
+                # 每10帧约1秒，显示秒数
+                remaining_sec = math.ceil(remaining_frames * 0.1)
+                status = f"⏱️ {remaining_sec}..."
+                feedback_md = f"## ⏱️ 倒计时: {remaining_sec}\n\n请准备好姿势"
 
             processed = pipeline.process_camera_frame(small)
             display = _shrink_for_display(
@@ -489,9 +490,11 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         with gr.Tab("📷 实时模式"):
             gr.Markdown(
                 "### 实时跟做训练，边做边获得矫正提示\n"
-                "**流程**: 选择动作和算法 → 点击「开始跟做」→ "
+                "**流程**: ① 点击摄像头区域开启摄像头 → "
+                "② 选择动作和算法 → ③ 点击「开始跟做」→ "
                 "3 秒倒计时 → 跟做动作（右侧实时显示建议）→ "
-                "点击「结束」→ 查看总体报告"
+                "④ 点击「结束」→ 查看总体报告\n\n"
+                "> ⚠️ **请先点击摄像头区域的录制按钮，看到画面后再点「开始跟做」**"
             )
 
             with gr.Row():
