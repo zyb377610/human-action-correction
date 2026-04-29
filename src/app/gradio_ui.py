@@ -345,6 +345,84 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             return f"✅ 模板录入成功: {action_name}"
         return "❌ 模板录入失败，请检查视频是否包含有效的人体姿态"
 
+    # -- 模板管理：摄像头录制模板 --
+
+    def on_tpl_cam_frame(frame):
+        """模板管理 — 摄像头录制帧处理"""
+        if frame is None:
+            return None
+        small, _ = _scale_frame(frame)
+        processed = pipeline.process_camera_frame(small)
+        if session.is_recording and processed.has_pose:
+            session.add_frame(processed.landmarks)
+        return _shrink_for_display(processed.annotated_image)
+
+    def on_tpl_start_recording():
+        """模板管理 — 开始录制"""
+        session.start_recording()
+        return (
+            "🔴 录制中… 请执行标准动作，完成后点击「停止录制」",
+            gr.update(interactive=False),
+            gr.update(interactive=True),
+        )
+
+    def on_tpl_stop_recording(action_input):
+        """模板管理 — 停止录制并保存为模板"""
+        if not action_input or not action_input.strip():
+            session.finish_analysis()
+            return (
+                "⚠️ 请先输入动作名称",
+                gr.update(interactive=True),
+                gr.update(interactive=False),
+            )
+
+        sequence = session.stop_recording()
+        if sequence is None:
+            session.finish_analysis()
+            return (
+                "⚠️ 录制帧数不足（至少 5 帧），请确保全身在画面中",
+                gr.update(interactive=True),
+                gr.update(interactive=False),
+            )
+
+        action_name = action_input.strip()
+
+        # 将 numpy 数组转为 PoseSequence 然后保存
+        from src.pose_estimation.data_types import PoseLandmark, PoseFrame, PoseSequence
+        seq = PoseSequence(fps=10.0)
+        for i in range(sequence.shape[0]):
+            landmarks = []
+            for j in range(sequence.shape[1]):
+                landmarks.append(PoseLandmark(
+                    x=float(sequence[i, j, 0]),
+                    y=float(sequence[i, j, 1]),
+                    z=float(sequence[i, j, 2]),
+                    visibility=float(sequence[i, j, 3]) if sequence.shape[2] > 3 else 1.0,
+                ))
+            frame = PoseFrame(
+                timestamp=i / 10.0,
+                frame_index=i,
+                landmarks=landmarks,
+            )
+            seq.add_frame(frame)
+
+        import time as _time
+        template_name = f"cam_template_{int(_time.time())}"
+
+        display_name = ACTION_DISPLAY_NAMES.get(action_name, action_name)
+        if action_name not in pipeline.template_library.list_actions():
+            pipeline.template_library.add_action(action_name, display_name)
+
+        pipeline.template_library.add_template(action_name, seq, template_name)
+        session.finish_analysis()
+        session.refresh_action_list()
+
+        return (
+            f"✅ 模板录入成功: {action_name}/{template_name} ({sequence.shape[0]} 帧)",
+            gr.update(interactive=True),
+            gr.update(interactive=False),
+        )
+
     # ================================================================
     # 界面构建
     # ================================================================
@@ -468,7 +546,8 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 fn=on_cam_record_frame,
                 inputs=[cam_rec_input],
                 outputs=[cam_rec_display],
-                stream_every=0.1,  # 100ms 间隔，提升帧率
+                stream_every=0.1,
+                show_progress="hidden",  # 禁止加载遮罩
             )
             cam_rec_start.click(
                 fn=on_start_cam_recording,
@@ -570,7 +649,8 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 fn=on_realtime_frame,
                 inputs=[rt_cam_input],
                 outputs=[rt_cam_display, rt_status, rt_feedback],
-                stream_every=0.1,  # 100ms 间隔，提升帧率
+                stream_every=0.1,
+                show_progress="hidden",  # 禁止加载遮罩
             )
 
             # 开始按钮
@@ -596,33 +676,99 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         # ============================================================
         with gr.Tab("📋 模板管理"):
             gr.Markdown("### 管理标准动作模板库")
+
             with gr.Row():
+                # ---- 左列：模板列表 ----
                 with gr.Column(scale=1):
                     gr.Markdown("#### 📂 模板列表")
                     template_info = gr.Markdown('点击"刷新"查看模板列表')
                     refresh_btn = gr.Button("🔄 刷新列表")
-                with gr.Column(scale=1):
+
+                # ---- 右列：录入新模板 ----
+                with gr.Column(scale=2):
                     gr.Markdown("#### ➕ 录入新模板")
-                    tpl_video = gr.Video(
-                        label="上传标准动作视频", sources=["upload"]
-                    )
-                    tpl_name = gr.Textbox(
-                        label="动作名称",
+
+                    tpl_name_input = gr.Textbox(
+                        label="动作名称（必填）",
                         placeholder="例如: squat, arm_raise, lunge",
-                        info="英文标识名",
-                    )
-                    record_btn = gr.Button("📥 录入模板", variant="primary")
-                    record_status = gr.Textbox(
-                        label="录入状态", interactive=False
+                        info="英文标识名，上传和录制共用",
                     )
 
+                    with gr.Tabs():
+                        # -- 方式一：上传视频 --
+                        with gr.Tab("📁 上传视频"):
+                            tpl_video = gr.Video(
+                                label="上传标准动作视频",
+                                sources=["upload"],
+                            )
+                            upload_btn = gr.Button(
+                                "📥 上传并录入", variant="primary"
+                            )
+                            upload_status = gr.Textbox(
+                                label="录入状态", interactive=False
+                            )
+
+                        # -- 方式二：摄像头录制 --
+                        with gr.Tab("📷 摄像头录制"):
+                            gr.Markdown(
+                                "> 先点击摄像头开启画面，"
+                                "然后点「开始录制」执行标准动作，"
+                                "完成后点「停止并保存」"
+                            )
+                            tpl_cam_input = gr.Image(
+                                label="摄像头",
+                                sources=["webcam"],
+                                streaming=True,
+                                type="numpy",
+                                height=240,
+                            )
+                            tpl_cam_display = gr.Image(
+                                label="骨骼叠加",
+                                type="numpy",
+                                interactive=False,
+                                height=240,
+                            )
+                            tpl_cam_status = gr.Textbox(
+                                label="录制状态",
+                                value="⏸️ 空闲",
+                                interactive=False,
+                            )
+                            with gr.Row():
+                                tpl_cam_start = gr.Button(
+                                    "� 开始录制", variant="primary"
+                                )
+                                tpl_cam_stop = gr.Button(
+                                    "⏹️ 停止并保存",
+                                    variant="secondary",
+                                    interactive=False,
+                                )
+
+            # -- 绑定事件 --
             refresh_btn.click(
                 fn=on_refresh_templates, outputs=[template_info]
             )
-            record_btn.click(
+            upload_btn.click(
                 fn=on_record_template,
-                inputs=[tpl_video, tpl_name],
-                outputs=[record_status],
+                inputs=[tpl_video, tpl_name_input],
+                outputs=[upload_status],
+            )
+
+            # 摄像头录制模板
+            tpl_cam_input.stream(
+                fn=on_tpl_cam_frame,
+                inputs=[tpl_cam_input],
+                outputs=[tpl_cam_display],
+                stream_every=0.1,
+                show_progress="hidden",
+            )
+            tpl_cam_start.click(
+                fn=on_tpl_start_recording,
+                outputs=[tpl_cam_status, tpl_cam_start, tpl_cam_stop],
+            )
+            tpl_cam_stop.click(
+                fn=on_tpl_stop_recording,
+                inputs=[tpl_name_input],
+                outputs=[tpl_cam_status, tpl_cam_start, tpl_cam_stop],
             )
 
         # ============================================================
