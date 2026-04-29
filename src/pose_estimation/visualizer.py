@@ -2,11 +2,11 @@
 姿态可视化模块
 
 在视频帧上绘制骨骼连接图、关键点标注和关节角度信息。
-支持实时可视化窗口展示。
+只绘制 17 个核心关节点及其连线，去掉面部细节和手指等噪声点。
 """
 
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -15,6 +15,39 @@ from .data_types import (
     PoseFrame, POSE_CONNECTIONS, LANDMARK_NAMES, NUM_LANDMARKS
 )
 from .feature_extractor import get_joint_angles, JOINT_ANGLE_DEFINITIONS
+
+
+# ===== 要显示的 17 个核心关节点 =====
+DISPLAY_JOINT_INDICES: Set[int] = {
+    0,               # nose — 头部参考
+    11, 12,           # 左右肩
+    13, 14,           # 左右肘
+    15, 16,           # 左右腕
+    23, 24,           # 左右髋
+    25, 26,           # 左右膝
+    27, 28,           # 左右踝
+    29, 30,           # 左右脚跟
+    31, 32,           # 左右脚尖
+}
+
+# 只绘制核心关节之间的骨骼连线
+DISPLAY_CONNECTIONS = [
+    # 躯干
+    (0, 11), (0, 12),                      # 鼻子 → 双肩（头部朝向）
+    (11, 12),                              # 双肩
+    (11, 23), (12, 24),                    # 肩 → 髋
+    (23, 24),                              # 双髋
+    # 左臂
+    (11, 13), (13, 15),                    # 左肩 → 左肘 → 左腕
+    # 右臂
+    (12, 14), (14, 16),                    # 右肩 → 右肘 → 右腕
+    # 左腿
+    (23, 25), (25, 27),                    # 左髋 → 左膝 → 左踝
+    (27, 29), (27, 31), (29, 31),          # 左脚
+    # 右腿
+    (24, 26), (26, 28),                    # 右髋 → 右膝 → 右踝
+    (28, 30), (28, 32), (30, 32),          # 右脚
+]
 
 
 # ===== 默认绘制样式 =====
@@ -49,7 +82,10 @@ def draw_skeleton(
     draw_low_visibility: bool = True,
 ) -> np.ndarray:
     """
-    在图像上绘制骨骼连接图和关键点
+    在图像上绘制 17 个核心关节的骨骼连接图
+
+    只绘制核心关节点和它们之间的连线，
+    去掉面部细节（眼睛/耳朵/嘴角）和手指等噪声点。
 
     Args:
         image: BGR 格式图像（会被修改）
@@ -58,7 +94,7 @@ def draw_skeleton(
         landmark_radius: 关键点半径
         connection_color: 连线颜色 (B, G, R)
         connection_thickness: 连线粗细
-        draw_low_visibility: 是否绘制低可见度的关键点（使用不同颜色）
+        draw_low_visibility: 是否绘制低可见度的关键点
 
     Returns:
         绘制后的图像
@@ -66,14 +102,13 @@ def draw_skeleton(
     h, w = image.shape[:2]
     landmarks = frame.landmarks
 
-    # 1. 绘制骨骼连线
-    for (i1, i2) in POSE_CONNECTIONS:
+    # 1. 绘制核心骨骼连线
+    for (i1, i2) in DISPLAY_CONNECTIONS:
         if i1 >= len(landmarks) or i2 >= len(landmarks):
             continue
 
         lm1, lm2 = landmarks[i1], landmarks[i2]
 
-        # 可见度判断
         both_visible = (lm1.visibility >= VISIBILITY_THRESHOLD and
                         lm2.visibility >= VISIBILITY_THRESHOLD)
 
@@ -88,8 +123,12 @@ def draw_skeleton(
 
         cv2.line(image, pt1, pt2, color, thickness)
 
-    # 2. 绘制关键点
-    for i, lm in enumerate(landmarks):
+    # 2. 只绘制核心关键点
+    for i in DISPLAY_JOINT_INDICES:
+        if i >= len(landmarks):
+            continue
+
+        lm = landmarks[i]
         is_visible = lm.visibility >= VISIBILITY_THRESHOLD
 
         if not is_visible and not draw_low_visibility:
