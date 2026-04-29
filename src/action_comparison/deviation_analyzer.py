@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.pose_estimation.data_types import PoseSequence, LANDMARK_NAMES
-from .distance_metrics import sequence_to_feature_matrix
+from .distance_metrics import sequence_to_feature_matrix, CORE_JOINT_INDICES, CORE_JOINT_NAMES
 from .comparison import ComparisonResult
 
 logger = logging.getLogger(__name__)
@@ -85,14 +85,14 @@ class JointDeviationAnalyzer:
         Returns:
             DeviationReport
         """
-        q_matrix = sequence_to_feature_matrix(query)   # (N, 99)
-        t_matrix = sequence_to_feature_matrix(template) # (M, 99)
+        q_matrix = sequence_to_feature_matrix(query)   # (N, 36) 12 核心关节
+        t_matrix = sequence_to_feature_matrix(template) # (M, 36)
         path = result.path
 
-        num_joints = 33
+        num_joints = len(CORE_JOINT_INDICES)
         joint_diffs = np.zeros((len(path), num_joints), dtype=np.float64)
 
-        # 沿对齐路径，对每一步计算每个关节的欧氏距离
+        # 沿对齐路径，对每一步计算每个核心关节的欧氏距离
         for step, (i, j) in enumerate(path):
             for k in range(num_joints):
                 q_xyz = q_matrix[i, k * 3: k * 3 + 3]
@@ -100,12 +100,16 @@ class JointDeviationAnalyzer:
                 joint_diffs[step, k] = float(np.sqrt(np.sum((q_xyz - t_xyz) ** 2)))
 
         # 每个关节的平均偏差
-        joint_mean = np.mean(joint_diffs, axis=0)  # (33,)
+        joint_mean = np.mean(joint_diffs, axis=0)  # (12,)
 
         # 构建 {关节名: 偏差} 字典
         joint_deviations = {}
         for k in range(num_joints):
-            name = LANDMARK_NAMES[k] if k < len(LANDMARK_NAMES) else f"joint_{k}"
+            joint_idx = CORE_JOINT_INDICES[k]
+            name = CORE_JOINT_NAMES.get(
+                joint_idx,
+                LANDMARK_NAMES[joint_idx] if joint_idx < len(LANDMARK_NAMES) else f"joint_{joint_idx}"
+            )
             joint_deviations[name] = float(joint_mean[k])
 
         # 排序取 top-K

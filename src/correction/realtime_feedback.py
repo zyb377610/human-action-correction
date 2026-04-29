@@ -21,6 +21,7 @@ from src.pose_estimation.data_types import PoseSequence
 from src.action_comparison.distance_metrics import (
     sequence_to_feature_matrix,
     get_distance_func,
+    CORE_JOINT_INDICES,
 )
 from src.action_comparison.dtw_algorithms import compute_dtw
 from src.correction.angle_utils import AngleCalculator
@@ -363,10 +364,10 @@ class RealtimeFeedbackEngine:
         if user_window.shape[0] < 2 or template_window.shape[0] < 2:
             return 0.0
 
-        # 转换为特征矩阵 (W, D)
-        # 简化：直接用 xyz 坐标展平
-        user_feat = user_window[:, :, :3].reshape(user_window.shape[0], -1)
-        tmpl_feat = template_window[:, :, :3].reshape(template_window.shape[0], -1)
+        # 转换为特征矩阵 — 只用 12 个核心关节点
+        core = CORE_JOINT_INDICES
+        user_feat = user_window[:, core, :3].reshape(user_window.shape[0], -1)
+        tmpl_feat = template_window[:, core, :3].reshape(template_window.shape[0], -1)
 
         try:
             distance, path, _ = compute_dtw(

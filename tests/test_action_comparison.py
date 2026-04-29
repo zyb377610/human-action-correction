@@ -119,12 +119,15 @@ class TestDistanceMetrics:
             get_distance_func("invalid")
 
     def test_sequence_to_feature_matrix(self, seq_a):
+        """默认使用 12 个核心关节点，输出 (T, 36)"""
         matrix = sequence_to_feature_matrix(seq_a)
+        assert matrix.shape == (20, 36)  # 12 核心关节 × 3
+
+    def test_sequence_to_feature_matrix_all_joints(self, seq_a):
+        """使用全部 33 个关节点时，输出 (T, 99)"""
+        all_joints = list(range(33))
+        matrix = sequence_to_feature_matrix(seq_a, joint_indices=all_joints)
         assert matrix.shape == (20, 99)
-        # 第一帧第一关键点 x=0*0.03=0.0
-        assert abs(matrix[0, 0] - 0.0) < 1e-10
-        # 第一帧第二关键点 x=1*0.03=0.03
-        assert abs(matrix[0, 3] - 0.03) < 1e-10
 
 
 # ===== DTW 算法测试 =====

@@ -29,6 +29,11 @@
       "display_name": "test_clap",
       "description": "",
       "template_count": 1
+    },
+    "test1": {
+      "display_name": "test1",
+      "description": "",
+      "template_count": 1
     }
   }
 }

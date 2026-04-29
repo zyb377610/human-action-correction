@@ -6,6 +6,8 @@ from src.action_comparison.distance_metrics import (
     manhattan_distance,
     get_distance_func,
     sequence_to_feature_matrix,
+    CORE_JOINT_INDICES,
+    CORE_JOINT_NAMES,
 )
 from src.action_comparison.dtw_algorithms import (
     classic_dtw,
@@ -29,6 +31,8 @@ __all__ = [
     "manhattan_distance",
     "get_distance_func",
     "sequence_to_feature_matrix",
+    "CORE_JOINT_INDICES",
+    "CORE_JOINT_NAMES",
     # DTW 算法
     "classic_dtw",
     "fast_dtw",
