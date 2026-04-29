@@ -41,6 +41,7 @@ class AnalysisResult:
     corrections: List[CorrectionItem] = field(default_factory=list)
     report: Optional[CorrectionReport] = None
     confidence: Optional[float] = None
+    algorithm_used: str = ""
 
     @property
     def num_corrections(self) -> int:
@@ -61,6 +62,8 @@ class AnalysisResult:
         ]
         if self.confidence is not None:
             lines.insert(1, f"🎯 识别置信度: {self.confidence:.1%}")
+        if self.algorithm_used:
+            lines.append(f"🔧 使用算法: {self.algorithm_used}")
         return "\n".join(lines)
 
 

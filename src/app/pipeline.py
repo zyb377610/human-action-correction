@@ -21,6 +21,10 @@ from src.pose_estimation.video_source import FileSource
 from src.data.template_library import TemplateLibrary
 from src.correction.pipeline import CorrectionPipeline
 from src.correction.report_visualizer import ReportVisualizer
+from src.correction.realtime_feedback import (
+    RealtimeFeedbackEngine,
+    FeedbackSnapshot,
+)
 
 from .data_types import AnalysisResult, ProcessedFrame
 
@@ -37,6 +41,22 @@ ACTION_DISPLAY_NAMES = {
 
 # 最大处理帧数
 MAX_FRAMES = 300
+
+# DTW 算法显示名称映射
+ALGORITHM_DISPLAY_NAMES = {
+    "dtw": "经典 DTW",
+    "fastdtw": "FastDTW",
+    "ddtw": "DerivativeDTW",
+    "auto": "自动选择",
+}
+
+# UI 下拉框算法选项
+ALGORITHM_CHOICES = [
+    ("经典 DTW", "dtw"),
+    ("FastDTW", "fastdtw"),
+    ("DerivativeDTW", "ddtw"),
+    ("自动选择（推荐）", "auto"),
+]
 
 
 class AppPipeline:
@@ -82,6 +102,12 @@ class AppPipeline:
 
         # 报告可视化
         self._visualizer = ReportVisualizer()
+
+        # 当前 DTW 算法设置 (dtw / fastdtw / ddtw / auto)
+        self._algorithm = "auto"
+
+        # 实时反馈引擎（在 init_realtime_session 时创建）
+        self._realtime_engine: Optional[RealtimeFeedbackEngine] = None
 
         logger.info("AppPipeline 初始化完成")
 
@@ -312,6 +338,10 @@ class AppPipeline:
                 action_name=action_name,
             )
 
+            # 确定使用的算法名称
+            algo_used = self._resolve_offline_algorithm()
+            algo_display = ALGORITHM_DISPLAY_NAMES.get(algo_used, algo_used)
+
             # 生成可视化文件
             deviation_plot_path = None
             try:
@@ -331,12 +361,13 @@ class AppPipeline:
                 action_display_name=display_name,
                 quality_score=report.quality_score,
                 similarity=report.similarity,
-                report_text=report.to_text(),
+                report_text=report.to_text() + f"\n\n【使用算法】{algo_display}",
                 deviation_plot_path=deviation_plot_path,
                 skeleton_video_path=None,  # 暂不生成骨骼视频
                 corrections=list(report.corrections),
                 report=report,
                 confidence=report.confidence,
+                algorithm_used=algo_used,
             )
 
             return result
@@ -387,6 +418,143 @@ class AppPipeline:
             )
             sequence.add_frame(frame)
         return sequence
+
+    # ================================================================
+    # 算法选择
+    # ================================================================
+
+    @property
+    def algorithm(self) -> str:
+        """当前 DTW 算法设置"""
+        return self._algorithm
+
+    def set_algorithm(self, algorithm: str):
+        """
+        设置 DTW 算法
+
+        Args:
+            algorithm: "dtw" / "fastdtw" / "ddtw" / "auto"
+        """
+        valid = {"dtw", "fastdtw", "ddtw", "auto"}
+        if algorithm not in valid:
+            raise ValueError(f"不支持的算法: {algorithm}，可选: {valid}")
+
+        self._algorithm = algorithm
+
+        # 更新 CorrectionPipeline 的对比器
+        offline_algo = self._resolve_offline_algorithm()
+        self._correction_pipeline._comparator._algorithm = offline_algo
+
+        # 更新实时引擎（如果已创建）
+        if self._realtime_engine is not None:
+            self._realtime_engine.algorithm = self._resolve_realtime_algorithm()
+
+        logger.info(
+            f"DTW 算法切换: {algorithm} "
+            f"(离线={offline_algo}, 实时={self._resolve_realtime_algorithm()})"
+        )
+
+    def _resolve_offline_algorithm(self) -> str:
+        """解析离线分析使用的实际算法"""
+        if self._algorithm == "auto":
+            return "ddtw"
+        return self._algorithm
+
+    def _resolve_realtime_algorithm(self) -> str:
+        """解析实时分析使用的实际算法"""
+        if self._algorithm == "auto":
+            return "fastdtw"
+        return self._algorithm
+
+    # ================================================================
+    # 实时反馈
+    # ================================================================
+
+    def init_realtime_session(self, action_name: str) -> bool:
+        """
+        初始化实时反馈会话
+
+        根据动作名称加载模板序列，创建 RealtimeFeedbackEngine。
+
+        Args:
+            action_name: 动作类别名称
+
+        Returns:
+            是否成功（模板库中有该动作的模板时返回 True）
+        """
+        templates = self._library.load_all_templates(action_name)
+        if not templates:
+            logger.warning(f"动作 '{action_name}' 无可用模板，无法启动实时反馈")
+            return False
+
+        # 使用第一个模板作为参考
+        template_name, template_seq = next(iter(templates.items()))
+
+        realtime_algo = self._resolve_realtime_algorithm()
+        self._realtime_engine = RealtimeFeedbackEngine(
+            template_sequence=template_seq,
+            algorithm=realtime_algo,
+            window_size=10,
+        )
+
+        logger.info(
+            f"实时反馈会话初始化: action={action_name}, "
+            f"template={template_name}, algorithm={realtime_algo}"
+        )
+        return True
+
+    def process_realtime_frame(
+        self,
+        frame: np.ndarray,
+        frame_index: int,
+        expected_total_frames: int,
+    ) -> tuple:
+        """
+        处理实时模式的单帧
+
+        Args:
+            frame: BGR 图像 (H, W, 3)
+            frame_index: 当前帧索引
+            expected_total_frames: 预期总帧数
+
+        Returns:
+            (ProcessedFrame, FeedbackSnapshot or None)
+        """
+        if frame is None or frame.size == 0:
+            return ProcessedFrame(annotated_image=frame), None
+
+        pose_frame = self._estimator.estimate_frame(frame)
+
+        if pose_frame is None:
+            empty_snap = FeedbackSnapshot(has_pose=False)
+            return ProcessedFrame(annotated_image=frame.copy()), empty_snap
+
+        # 绘制骨骼
+        annotated = frame.copy()
+        draw_skeleton(annotated, pose_frame)
+
+        # 提取 landmarks
+        landmarks = pose_frame.to_numpy()  # (33, 4)
+
+        # 实时反馈分析
+        snapshot = None
+        if self._realtime_engine is not None:
+            snapshot = self._realtime_engine.analyze_frame(
+                landmarks=landmarks,
+                frame_index=frame_index,
+                expected_total_frames=expected_total_frames,
+            )
+
+        return ProcessedFrame(
+            annotated_image=annotated,
+            landmarks=landmarks,
+        ), snapshot
+
+    def end_realtime_session(self):
+        """结束实时反馈会话"""
+        if self._realtime_engine is not None:
+            self._realtime_engine.reset()
+            self._realtime_engine = None
 
     def close(self):
         """释放资源"""
