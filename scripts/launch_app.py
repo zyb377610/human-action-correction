@@ -20,6 +20,7 @@ sys.path.insert(0, str(project_root))
 
 from src.app.pipeline import AppPipeline
 from src.app.gradio_ui import create_gradio_app
+import gradio as gr
 
 
 def parse_args():
@@ -97,6 +98,10 @@ def main():
         server_port=args.port,
         share=args.share,
         show_error=True,
+        theme=gr.themes.Soft(
+            primary_hue="blue",
+            secondary_hue="sky",
+        ),
     )
 
 

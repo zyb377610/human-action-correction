@@ -1,0 +1,29 @@
+{
+  "actions": {
+    "squat": {
+      "display_name": "深蹲",
+      "description": "",
+      "template_count": 1
+    },
+    "arm_raise": {
+      "display_name": "手臂举起",
+      "description": "",
+      "template_count": 1
+    },
+    "side_bend": {
+      "display_name": "侧弯",
+      "description": "",
+      "template_count": 1
+    },
+    "lunge": {
+      "display_name": "弓步",
+      "description": "",
+      "template_count": 1
+    },
+    "standing_stretch": {
+      "display_name": "站立拉伸",
+      "description": "",
+      "template_count": 1
+    }
+  }
+}
