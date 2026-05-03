@@ -87,6 +87,10 @@ class CorrectionReport:
     angle_deviations: Dict[str, tuple] = field(default_factory=dict)
     confidence: float = 0.0
 
+    # 内部数据（供对比视频生成使用，不参与序列化）
+    _best_template: object = field(default=None, repr=False)
+    _comparison_result: object = field(default=None, repr=False)
+
     def to_text(self) -> str:
         """
         格式化为可读的中文文本报告

@@ -172,7 +172,17 @@ class FileSource(VideoSource):
         self._cap = cv2.VideoCapture(str(self._path))
 
         if not self._cap.isOpened():
-            raise RuntimeError(f"无法打开视频文件: {self._path}")
+            suffix = self._path.suffix.lower()
+            hint = ""
+            if suffix in (".avi", ".mkv", ".flv", ".wmv"):
+                hint = (
+                    f"\n提示: {suffix} 格式可能使用了不被支持的编码。"
+                    "请尝试用格式工厂或 HandBrake 将视频转为 MP4 (H.264) 后重试。"
+                )
+            raise RuntimeError(
+                f"无法打开视频文件: {self._path}"
+                f"\n请确认文件未损坏且格式受 OpenCV/FFmpeg 支持。{hint}"
+            )
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         """读取一帧视频画面"""

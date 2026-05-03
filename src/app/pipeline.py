@@ -25,8 +25,9 @@ from src.correction.realtime_feedback import (
     RealtimeFeedbackEngine,
     FeedbackSnapshot,
 )
+from src.action_comparison.comparison_video import generate_comparison_video
 
-from .data_types import AnalysisResult, ProcessedFrame
+from .data_types import AnalysisResult, ProcessedFrame, TemplateRecordResult
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ class AppPipeline:
         Returns:
             AnalysisResult
         """
-        total_steps = 4
+        total_steps = 5  # 骨骼提取 + 分类 + DTW + 报告 + 对比视频
 
         def _progress(step: int, msg: str):
             if progress_callback:
@@ -153,7 +154,8 @@ class AppPipeline:
 
         # Step 2-4: 矫正分析
         return self._analyze_sequence_internal(
-            sequence, action_name, progress_callback, step_offset=1
+            sequence, action_name, progress_callback, step_offset=1,
+            video_path=video_path,
         )
 
     # ================================================================
@@ -269,6 +271,87 @@ class AppPipeline:
             logger.error(f"模板录入失败: {e}")
             return False
 
+    def record_template_with_error(
+        self,
+        video_path: str,
+        action_name: str,
+        template_name: Optional[str] = None,
+    ) -> TemplateRecordResult:
+        """
+        从视频提取骨骼序列并保存为标准模板（带详细错误信息）
+
+        与 record_template 功能相同，但返回详细的成功/失败结果。
+
+        Args:
+            video_path: 视频文件路径
+            action_name: 动作类别名称
+            template_name: 模板名称（None 则自动生成）
+
+        Returns:
+            TemplateRecordResult（含 success 和 error 字段）
+        """
+        from pathlib import Path as _Path
+        video_file = _Path(video_path)
+
+        # 检查文件存在
+        if not video_file.exists():
+            return TemplateRecordResult(
+                success=False, error=f"视频文件不存在: {video_path}"
+            )
+
+        # 检查文件扩展名
+        suffix = video_file.suffix.lower()
+        supported = {".mp4", ".avi", ".mov", ".webm", ".mkv", ".flv", ".wmv", ".m4v"}
+        if suffix not in supported:
+            logger.warning(f"视频格式可能不被支持: {suffix}，尝试用 OpenCV 打开…")
+
+        # 检查 OpenCV 能否打开
+        cap = cv2.VideoCapture(str(video_file))
+        if not cap.isOpened():
+            cap.release()
+            return TemplateRecordResult(
+                success=False,
+                error=(
+                    f"无法打开视频文件（格式或编码不支持）: {video_file.name}\n\n"
+                    "请尝试以下方法：\n"
+                    "1. 用格式工厂 / HandBrake 将视频转为 MP4 (H.264) 格式\n"
+                    "2. 使用「摄像头录制」方式重新录制标准动作"
+                ),
+            )
+        # 读取一帧验证
+        ok, _ = cap.read()
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+
+        if not ok:
+            return TemplateRecordResult(
+                success=False,
+                error=(
+                    f"视频文件可打开但无法读取帧数据: {video_file.name}\n"
+                    "该视频可能已损坏或使用了不支持的编码格式，请转换为 MP4 后重试。"
+                ),
+            )
+
+        # 使用标准方法录入
+        try:
+            success = self.record_template(video_path, action_name, template_name)
+            if success:
+                return TemplateRecordResult(success=True)
+            else:
+                return TemplateRecordResult(
+                    success=False,
+                    error=(
+                        f"视频处理失败 ({total_frames} 帧, {fps:.1f} fps)。\n"
+                        "可能原因：动作识别帧数不足（需 ≥5 帧有姿态），或视频中未检测到人体。"
+                    ),
+                )
+        except Exception as e:
+            logger.error(f"模板录入异常: {e}", exc_info=True)
+            return TemplateRecordResult(
+                success=False, error=f"处理异常: {str(e)}"
+            )
+
     # ================================================================
     # 辅助属性
     # ================================================================
@@ -306,6 +389,7 @@ class AppPipeline:
         action_name: Optional[str],
         progress_callback: Optional[Callable],
         step_offset: int = 0,
+        video_path: Optional[str] = None,
     ) -> AnalysisResult:
         """
         内部分析方法（从 PoseSequence 开始）
@@ -315,6 +399,7 @@ class AppPipeline:
             action_name: 动作类别
             progress_callback: 进度回调
             step_offset: 步骤偏移量（视频模式偏移 1）
+            video_path: 原始视频路径（用于生成对比视频，None 则跳过）
         """
         total_steps = 4
 
@@ -351,6 +436,30 @@ class AppPipeline:
             except Exception as e:
                 logger.warning(f"生成偏差图失败: {e}")
 
+            # 生成骨骼对比视频
+            comparison_video_path = None
+            if video_path and report._best_template and report._comparison_result:
+                try:
+                    video_out = self._output_dir / f"comparison_{int(time.time())}.mp4"
+                    if progress_callback:
+                        progress_callback(
+                            step_offset + 4, 5,
+                            "正在生成骨骼对比视频…"
+                        )
+                    comparison_video_path = generate_comparison_video(
+                        video_path=video_path,
+                        user_sequence=sequence,
+                        template_sequence=report._best_template,
+                        comparison_result=report._comparison_result,
+                        joint_deviations=report.joint_deviations,
+                        output_path=str(video_out),
+                        quality_score=report.quality_score,
+                        corrections=list(report.corrections),
+                        progress_callback=None,
+                    )
+                except Exception as e:
+                    logger.warning(f"生成对比视频失败: {e}")
+
             # 构建结果
             display_name = ACTION_DISPLAY_NAMES.get(
                 report.action_name, report.action_display_name or report.action_name
@@ -363,7 +472,8 @@ class AppPipeline:
                 similarity=report.similarity,
                 report_text=report.to_text() + f"\n\n【使用算法】{algo_display}",
                 deviation_plot_path=deviation_plot_path,
-                skeleton_video_path=None,  # 暂不生成骨骼视频
+                skeleton_video_path=None,
+                comparison_video_path=comparison_video_path,
                 corrections=list(report.corrections),
                 report=report,
                 confidence=report.confidence,

@@ -34,6 +34,11 @@
       "display_name": "test1",
       "description": "",
       "template_count": 1
+    },
+    "throw": {
+      "display_name": "throw",
+      "description": "",
+      "template_count": 1
     }
   }
 }

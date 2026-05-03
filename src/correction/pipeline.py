@@ -207,6 +207,10 @@ class CorrectionPipeline:
             prediction=prediction,
         )
 
+        # 存储内部数据供对比视频生成
+        report._best_template = best_template
+        report._comparison_result = best_result
+
         logger.info(
             f"矫正报告生成完成: 评分={report.quality_score:.1f}, "
             f"建议数={report.num_corrections}"

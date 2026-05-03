@@ -91,10 +91,17 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
     # Tab 1 回调：视频分析
     # ================================================================
 
-    def on_analyze_video(video, action_choice, algo_label, progress=gr.Progress()):
+    def on_analyze_video(video_file, action_choice, algo_label, progress=gr.Progress()):
         """上传视频分析"""
-        if video is None:
-            return "⚠️ 请先上传视频文件", None, None
+        # gr.File 可能返回 str 路径，也可能返回 dict（含 name 键）
+        if video_file is None:
+            return "⚠️ 请先上传视频文件", None, None, None
+        if isinstance(video_file, dict):
+            video_path = video_file.get("name", "")
+        else:
+            video_path = str(video_file)
+        if not video_path:
+            return "⚠️ 请先上传视频文件", None, None, None
 
         action_name = _resolve_action(action_choice)
         algo_id = _resolve_algorithm(algo_label)
@@ -105,12 +112,12 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
 
         progress(0, desc="开始分析…")
         result = pipeline.analyze_video(
-            video_path=video,
+            video_path=video_path,
             action_name=action_name,
             progress_callback=progress_cb,
         )
         session.last_result = result
-        return result.report_text, result.deviation_plot_path, result.summary()
+        return result.report_text, result.deviation_plot_path, result.summary(), result.comparison_video_path
 
     def on_start_cam_recording():
         """视频分析 Tab — 摄像头录制：开始"""
@@ -138,7 +145,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             session.finish_analysis()
             return (
                 "⚠️ 录制帧数不足（至少 5 帧），请确保全身在画面中",
-                "", None,
+                "", None, None,
                 gr.update(interactive=True),
                 gr.update(interactive=False),
             )
@@ -161,6 +168,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             "✅ 分析完成",
             result.report_text,
             result.deviation_plot_path,
+            result.comparison_video_path,
             gr.update(interactive=True),
             gr.update(interactive=False),
         )
@@ -333,14 +341,21 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 lines.append(f"  - {t}")
         return "\n".join(lines)
 
-    def on_record_template(video, action_input):
-        if video is None:
+    def on_record_template(video_file, action_input):
+        # gr.File 可能返回 str 路径，也可能返回 dict（含 name 键）
+        if video_file is None:
+            return "⚠️ 请上传视频文件", gr.update(), gr.update()
+        if isinstance(video_file, dict):
+            video_path = video_file.get("name", "")
+        else:
+            video_path = str(video_file)
+        if not video_path:
             return "⚠️ 请上传视频文件", gr.update(), gr.update()
         if not action_input or not action_input.strip():
             return "⚠️ 请输入动作名称", gr.update(), gr.update()
         action_name = action_input.strip()
-        success = pipeline.record_template(video, action_name)
-        if success:
+        result = pipeline.record_template_with_error(video_path, action_name)
+        if result.success:
             session.refresh_action_list()
             new_choices = session.get_action_choices()
             return (
@@ -348,7 +363,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 gr.update(choices=new_choices),
                 gr.update(choices=new_choices),
             )
-        return "❌ 模板录入失败", gr.update(), gr.update()
+        return f"❌ 模板录入失败: {result.error}", gr.update(), gr.update()
 
     # -- 模板管理：摄像头录制模板 --
 
@@ -447,6 +462,11 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         # ============================================================
         with gr.Tab("📹 视频分析"):
             gr.Markdown("### 上传视频或摄像头录制，获取动作矫正报告")
+            gr.Markdown(
+                "> 💡 支持格式: MP4、AVI、MOV、WebM、MKV 等。"
+                "后端使用 OpenCV 处理，浏览器预览不影响分析。"
+                "如遇编码问题，建议转为 MP4 (H.264)。"
+            )
 
             with gr.Row():
                 vid_input_mode = gr.Radio(
@@ -473,8 +493,8 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             with gr.Column(visible=True) as upload_col:
                 with gr.Row():
                     with gr.Column(scale=1):
-                        video_input = gr.Video(
-                            label="上传视频", sources=["upload"]
+                        video_input = gr.File(
+                            label="上传视频", file_types=["video"]
                         )
                         analyze_btn = gr.Button(
                             "🔍 开始分析", variant="primary", size="lg"
@@ -488,6 +508,10 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                         )
                         vid_plot = gr.Image(
                             label="📈 偏差分析图", type="filepath"
+                        )
+                        vid_comparison = gr.Video(
+                            label="🎬 骨骼对比视频（左：您的动作 🟢🟡🔴 | 右：标准模板）",
+                            height=360,
                         )
 
             # -- 摄像头录制子模式 --
@@ -548,7 +572,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             analyze_btn.click(
                 fn=on_analyze_video,
                 inputs=[video_input, vid_action_dropdown, vid_algo_dropdown],
-                outputs=[vid_report, vid_plot, vid_summary],
+                outputs=[vid_report, vid_plot, vid_summary, vid_comparison],
             )
 
             # 摄像头录制
@@ -568,7 +592,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 inputs=[vid_action_dropdown, vid_algo_dropdown],
                 outputs=[
                     cam_rec_status,
-                    cam_rec_report, cam_rec_plot,
+                    cam_rec_report, cam_rec_plot, vid_comparison,
                     cam_rec_start, cam_rec_stop,
                 ],
             )
@@ -707,9 +731,13 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                     with gr.Tabs():
                         # -- 方式一：上传视频 --
                         with gr.Tab("📁 上传视频"):
-                            tpl_video = gr.Video(
+                            gr.Markdown(
+                                "> 支持 MP4、AVI、MOV、WebM 等常见格式。"
+                                "如遇格式问题，可用格式工厂等工具转为 MP4。"
+                            )
+                            tpl_video = gr.File(
                                 label="上传标准动作视频",
-                                sources=["upload"],
+                                file_types=["video"],
                             )
                             upload_btn = gr.Button(
                                 "📥 上传并录入", variant="primary"

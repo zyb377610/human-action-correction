@@ -38,6 +38,7 @@ class AnalysisResult:
     report_text: str = ""
     deviation_plot_path: Optional[str] = None
     skeleton_video_path: Optional[str] = None
+    comparison_video_path: Optional[str] = None
     corrections: List[CorrectionItem] = field(default_factory=list)
     report: Optional[CorrectionReport] = None
     confidence: Optional[float] = None
@@ -83,3 +84,16 @@ class ProcessedFrame:
     @property
     def has_pose(self) -> bool:
         return self.landmarks is not None
+
+
+@dataclass
+class TemplateRecordResult:
+    """
+    模板录入结果
+
+    Attributes:
+        success: 是否录入成功
+        error: 失败时的错误描述
+    """
+    success: bool = False
+    error: str = ""
