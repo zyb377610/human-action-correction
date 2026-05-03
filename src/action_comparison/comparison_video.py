@@ -104,13 +104,14 @@ def generate_comparison_video(
     quality_score: float = 0.0,
     corrections: Optional[List] = None,
     progress_callback=None,
+    video_start_frame: int = 0,
 ) -> Optional[str]:
     """
     生成左右并排的骨骼对比视频
 
     Args:
         video_path: 用户原始视频路径
-        user_sequence: 用户 PoseSequence
+        user_sequence: 用户 PoseSequence（可能已裁剪）
         template_sequence: 模板 PoseSequence
         comparison_result: DTW 对比结果（含对齐路径 path）
         joint_deviations: 关节偏差 {name: deviation}
@@ -119,6 +120,7 @@ def generate_comparison_video(
         quality_score: 质量评分 [0, 100]
         corrections: 矫正建议列表
         progress_callback: fn(current, total)
+        video_start_frame: 视频读取起始帧偏移（裁剪场景）
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,8 +201,12 @@ def generate_comparison_video(
             logger.error(f"无法创建输出视频: {output_path}")
             return None
 
-    # ---- 8. 逐帧生成 ----
-    frame_count = min(total_video_frames, user_sequence.num_frames)
+    # ---- 8. 逐帧生成（从 video_start_frame 开始） ----
+    # 跳到起始帧
+    if video_start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, video_start_frame)
+
+    frame_count = min(total_video_frames - video_start_frame, user_sequence.num_frames)
     step = max(1, frame_count // 100)
 
     for user_idx in range(frame_count):

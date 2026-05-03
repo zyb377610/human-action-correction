@@ -212,6 +212,107 @@ def preprocess_pipeline(
     return result
 
 
+def extract_action_segment(
+    sequence: PoseSequence,
+    min_frames: int = 10,
+    smooth_window: int = 5,
+) -> PoseSequence:
+    """
+    从长视频序列中自动提取动作发生的片段
+
+    通过计算逐帧运动能量（所有核心关节位移之和），
+    找到连续高能量区域作为"动作片段"，剔除准备/收尾等无关帧。
+
+    原理：
+    - 用户录制视频通常包含：站定准备 → 执行动作 → 站定收尾
+    - 非动作段的运动能量接近 0，动作段能量显著升高
+    - 取能量最高的连续区域作为动作片段
+
+    Args:
+        sequence: 完整视频的姿态序列
+        min_frames: 最小帧数（低于此值不裁剪）
+        smooth_window: 能量曲线平滑窗口
+
+    Returns:
+        裁剪后的 PoseSequence（如果无法检测则返回原序列）
+    """
+    T = sequence.num_frames
+    if T < min_frames * 2:
+        return sequence
+
+    from src.action_comparison.distance_metrics import CORE_JOINT_INDICES
+
+    # 1. 计算逐帧运动能量（相邻帧核心关节的总位移）
+    energy = np.zeros(T - 1, dtype=np.float64)
+    prev_positions = None
+    for t, frame in enumerate(sequence.frames):
+        positions = []
+        for j in CORE_JOINT_INDICES:
+            if j < len(frame.landmarks):
+                lm = frame.landmarks[j]
+                if lm.visibility > 0.3:
+                    positions.append((lm.x, lm.y))
+        if not positions:
+            continue
+        positions = np.array(positions)
+        if prev_positions is not None and len(positions) == len(prev_positions):
+            energy[t - 1] = np.mean(np.sqrt(np.sum((positions - prev_positions) ** 2, axis=1)))
+        prev_positions = positions
+
+    if len(energy) == 0:
+        return sequence
+
+    # 2. 平滑能量曲线
+    if smooth_window > 1 and len(energy) >= smooth_window:
+        kernel = np.ones(smooth_window) / smooth_window
+        energy = np.convolve(energy, kernel, mode='same')
+
+    # 3. 找到能量最高的连续区域
+    # 计算累积能量，用滑动窗口找最佳段
+    threshold = np.percentile(energy, 30)  # 30分位数作为基线
+    threshold = max(threshold, 0.002)  # 最小阈值
+
+    above = energy > threshold
+    # 找到所有连续的高能量段
+    segments = []
+    start = None
+    for i, val in enumerate(above):
+        if val and start is None:
+            start = i
+        elif not val and start is not None:
+            if i - start >= min_frames:
+                segments.append((start, i))
+            start = None
+    if start is not None and T - 1 - start >= min_frames:
+        segments.append((start, T - 1))
+
+    if not segments:
+        return sequence  # 无有效片段，返回原序列
+
+    # 取最长的段
+    best = max(segments, key=lambda s: s[1] - s[0])
+    start_idx = max(0, best[0] - 3)   # 前留 3 帧余量
+    end_idx = min(T, best[1] + 4)     # 后留 4 帧余量
+
+    if end_idx - start_idx < min_frames:
+        return sequence
+
+    # 4. 构建裁剪后的序列
+    cropped = PoseSequence(fps=sequence.fps, metadata=dict(sequence.metadata))
+    cropped.metadata['cropped_from'] = (start_idx, end_idx)
+    cropped.metadata['original_frames'] = T
+
+    for i in range(start_idx, end_idx):
+        if i < sequence.num_frames:
+            cropped.add_frame(sequence.frames[i])
+
+    logger.info(
+        f"动作片段提取: {T}帧 → {cropped.num_frames}帧 "
+        f"(帧 {start_idx}-{end_idx})"
+    )
+    return cropped
+
+
 def _array_to_sequence(arr: np.ndarray, ref_seq: PoseSequence) -> PoseSequence:
     """将 NumPy 数组转回 PoseSequence，保留原序列的时间戳和元信息"""
     new_seq = PoseSequence(fps=ref_seq.fps, metadata=dict(ref_seq.metadata))

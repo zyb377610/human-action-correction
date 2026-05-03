@@ -102,21 +102,18 @@ def get_distance_func(name: str) -> Callable:
 def sequence_to_feature_matrix(
     sequence,
     joint_indices: Optional[Sequence[int]] = None,
+    normalize_body_scale: bool = True,
 ) -> np.ndarray:
     """
     将 PoseSequence 转换为特征矩阵
 
-    默认只使用 12 个核心关节点的 (x, y, z) 坐标，
-    去掉头部、手指、脚趾等噪声点，提升 DTW 比对精度。
-
     Args:
         sequence: PoseSequence 对象
-        joint_indices: 要使用的关节点索引列表，
-                       None 时使用 CORE_JOINT_INDICES（12 个核心关节）
+        joint_indices: 要使用的关节点索引，None 时用 CORE_JOINT_INDICES
+        normalize_body_scale: 是否按躯干长度归一化（消除体型差异）
 
     Returns:
         (T, num_joints * 3) ndarray
-        默认: (T, 36)  即 12 个关节 × 3 维坐标
     """
     if joint_indices is None:
         joint_indices = CORE_JOINT_INDICES
@@ -125,12 +122,41 @@ def sequence_to_feature_matrix(
     num_joints = len(joint_indices)
     matrix = np.zeros((T, num_joints * 3), dtype=np.float64)
 
+    # 计算身体尺度因子（躯干长度：肩中点到髋中点）
+    scale_factor = 1.0
+    if normalize_body_scale:
+        scale_factor = _compute_body_scale(sequence)
+        if scale_factor < 0.05:
+            scale_factor = 1.0  # 兜底
+
     for t, frame in enumerate(sequence.frames):
         for k, j in enumerate(joint_indices):
             if j < len(frame.landmarks):
                 lm = frame.landmarks[j]
-                matrix[t, k * 3] = lm.x
-                matrix[t, k * 3 + 1] = lm.y
-                matrix[t, k * 3 + 2] = lm.z
+                matrix[t, k * 3] = lm.x / scale_factor
+                matrix[t, k * 3 + 1] = lm.y / scale_factor
+                matrix[t, k * 3 + 2] = lm.z / scale_factor
 
     return matrix
+
+
+def _compute_body_scale(sequence) -> float:
+    """计算身体尺度因子（平均躯干长度），用于归一化体型差异"""
+    # 肩中点(11,12) → 髋中点(23,24)
+    total_torso = 0.0
+    count = 0
+    for frame in sequence.frames:
+        landmarks = frame.landmarks
+        if len(landmarks) <= 24:
+            continue
+        # 肩中点
+        sx = (landmarks[11].x + landmarks[12].x) / 2
+        sy = (landmarks[11].y + landmarks[12].y) / 2
+        # 髋中点
+        hx = (landmarks[23].x + landmarks[24].x) / 2
+        hy = (landmarks[23].y + landmarks[24].y) / 2
+        torso = np.sqrt((sx - hx) ** 2 + (sy - hy) ** 2)
+        if torso > 0.01:
+            total_torso += torso
+            count += 1
+    return total_torso / count if count > 0 else 1.0

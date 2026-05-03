@@ -88,7 +88,7 @@ class ActionComparator:
         Args:
             query: 用户动作序列
             template: 标准模板序列
-            template_name: 模板名称（用于标注结果）
+            template_name: 模板名称
 
         Returns:
             ComparisonResult
@@ -98,9 +98,13 @@ class ActionComparator:
             query = preprocess_pipeline(query, target_frames=self._target_frames)
             template = preprocess_pipeline(template, target_frames=self._target_frames)
 
-        # 转换为特征矩阵
-        q_matrix = sequence_to_feature_matrix(query)
-        t_matrix = sequence_to_feature_matrix(template)
+        # 转换为特征矩阵（带身体比例归一化）
+        q_matrix = sequence_to_feature_matrix(
+            query, normalize_body_scale=True
+        )
+        t_matrix = sequence_to_feature_matrix(
+            template, normalize_body_scale=True
+        )
 
         # DTW 计算
         distance, path, cost_matrix = compute_dtw(

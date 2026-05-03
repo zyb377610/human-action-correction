@@ -16,11 +16,11 @@ from .comparison import ComparisonResult
 
 logger = logging.getLogger(__name__)
 
-# 偏差严重程度阈值（基于关节平均欧氏距离）
+# 偏差严重程度阈值（基于归一化坐标 + 身体比例归一化后的欧氏距离）
 SEVERITY_THRESHOLDS = {
-    "mild": 0.05,       # < 0.05: 轻微
-    "moderate": 0.12,   # 0.05 ~ 0.12: 中等
-    # > 0.12: 严重
+    "mild": 0.08,       # < 0.08: 轻微
+    "moderate": 0.18,   # 0.08 ~ 0.18: 中等
+    # > 0.18: 严重
 }
 
 

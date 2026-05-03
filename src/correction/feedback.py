@@ -8,6 +8,8 @@
 import logging
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from src.action_comparison.deviation_analyzer import DeviationReport
 from src.models.data_types import PredictionResult
 from src.utils.config import get_config
@@ -94,14 +96,17 @@ class FeedbackGenerator:
         Returns:
             CorrectionReport
         """
-        # 确定质量评分
+        # 确定质量评分（sigmoid 映射：低相似度低分，中高相似度加速上升）
         if quality_score is not None:
             score = quality_score
         elif prediction is not None:
             score = prediction.quality_score
         else:
-            # 从相似度推算 (similarity ∈ [0,1] → score ∈ [0,100])
-            score = similarity * 100.0
+            # sigmoid-like 映射 similarity ∈ [0,1] → score ∈ [0,100]
+            # sim=0.2→14, 0.4→35, 0.5→50, 0.6→65, 0.7→77, 0.8→86, 0.9→92
+            k = 6.0  # 陡峭度
+            x0 = 0.5  # 中点
+            score = 100.0 / (1.0 + np.exp(-k * (similarity - x0)))
 
         # 确定置信度
         confidence = prediction.confidence if prediction else 0.0

@@ -36,9 +36,9 @@ _setup_chinese_font()
 # 偏差颜色映射
 def _deviation_color(dev: float) -> str:
     """根据偏差值返回颜色"""
-    if dev < 0.05:
+    if dev < 0.08:
         return "#2ecc71"   # 绿色 - 正常
-    elif dev < 0.12:
+    elif dev < 0.18:
         return "#f39c12"   # 黄色 - 轻微
     else:
         return "#e74c3c"   # 红色 - 严重
@@ -97,8 +97,8 @@ class ReportVisualizer:
         bars = ax.barh(names, values, color=colors, edgecolor="white", height=0.6)
 
         # 添加阈值线
-        ax.axvline(x=0.05, color="#f39c12", linestyle="--", alpha=0.7, label="轻微阈值")
-        ax.axvline(x=0.12, color="#e74c3c", linestyle="--", alpha=0.7, label="严重阈值")
+        ax.axvline(x=0.08, color="#f39c12", linestyle="--", alpha=0.7, label="Mild")
+        ax.axvline(x=0.18, color="#e74c3c", linestyle="--", alpha=0.7, label="Severe")
 
         # 在柱状图上标注数值
         for bar, val in zip(bars, values):
@@ -131,9 +131,9 @@ class ReportVisualizer:
         绘制偏差标注骨骼图
 
         在骨骼图上用颜色标注各关节的偏差程度：
-        - 绿色: 正常 (< 0.05)
-        - 黄色: 轻微 (0.05-0.12)
-        - 红色: 严重 (> 0.12)
+        - 绿色: 正常 (< 0.08)
+        - 黄色: 轻微 (0.08-0.18)
+        - 红色: 严重 (> 0.18)
 
         Args:
             report: 矫正报告
@@ -168,7 +168,7 @@ class ReportVisualizer:
             x, y = layout[idx]
             dev = report.joint_deviations.get(name, 0.0)
             color = _deviation_color(dev)
-            size = 80 if dev > 0.05 else 40
+            size = 80 if dev > 0.08 else 40
             ax.scatter(x, y, c=color, s=size, zorder=5, edgecolors="black", linewidths=0.5)
 
         # 标注偏差最大的关节名称
@@ -202,9 +202,9 @@ class ReportVisualizer:
         # 图例
         from matplotlib.patches import Patch
         legend_elements = [
-            Patch(facecolor="#2ecc71", label="正常 (< 0.05)"),
-            Patch(facecolor="#f39c12", label="轻微 (0.05-0.12)"),
-            Patch(facecolor="#e74c3c", label="严重 (> 0.12)"),
+            Patch(facecolor="#2ecc71", label="OK (<0.08)"),
+            Patch(facecolor="#f39c12", label="Mild (0.08-0.18)"),
+            Patch(facecolor="#e74c3c", label="Severe (>0.18)"),
         ]
         ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
