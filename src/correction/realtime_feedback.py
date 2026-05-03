@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.pose_estimation.data_types import PoseSequence
+from src.data.preprocessing import filter_skeleton_outliers, extract_action_segment
 from src.action_comparison.distance_metrics import (
     sequence_to_feature_matrix,
     get_distance_func,
@@ -27,6 +28,32 @@ from src.action_comparison.dtw_algorithms import compute_dtw
 from src.correction.angle_utils import AngleCalculator
 
 logger = logging.getLogger(__name__)
+
+
+def _window_to_angle_matrix(window: np.ndarray) -> np.ndarray:
+    """
+    将关键点窗口转换为角度特征矩阵
+
+    Args:
+        window: (T, 33, 4) 关键点窗口
+
+    Returns:
+        (T, num_angles) 角度特征矩阵，值归一化到 [0,1]
+    """
+    from src.correction.angle_utils import AngleCalculator, ANGLE_DEFINITIONS
+
+    calc = AngleCalculator()
+    T = window.shape[0]
+    angle_names = list(ANGLE_DEFINITIONS.keys())
+    n_angles = len(angle_names)
+    result = np.zeros((T, n_angles), dtype=np.float64)
+
+    for t in range(T):
+        angles = calc.compute_frame_angles(window[t])
+        for k, name in enumerate(angle_names):
+            result[t, k] = angles[name] / 180.0
+
+    return result
 
 
 # ================================================================
@@ -186,6 +213,10 @@ class RealtimeFeedbackEngine:
             angle_threshold: 角度偏差阈值（度），低于阈值不报告
             dedup_interval: 建议去重间隔（秒），同一建议在此间隔内不重复
         """
+        # 对模板也进行骨骼过滤和片段提取（确保模板干净）
+        template_sequence = filter_skeleton_outliers(template_sequence)
+        template_sequence = extract_action_segment(template_sequence)
+
         self._template = template_sequence
         self._template_array = template_sequence.to_numpy()  # (T, 33, 4)
         self._algorithm = algorithm
@@ -205,9 +236,14 @@ class RealtimeFeedbackEngine:
         # 帧计数器
         self._frame_count = 0
 
+        # 骨骼一致性检测：记录上一帧的躯干特征，用于检测实时帧中的骨骼突变
+        self._last_torso_length: Optional[float] = None
+        self._last_body_center: Optional[np.ndarray] = None
+
         logger.info(
             f"RealtimeFeedbackEngine 初始化: algorithm={algorithm}, "
-            f"window={window_size}, threshold={angle_threshold}°"
+            f"window={window_size}, threshold={angle_threshold}°, "
+            f"template_frames={template_sequence.num_frames}"
         )
 
     @property
@@ -223,6 +259,50 @@ class RealtimeFeedbackEngine:
         self._frame_buffer.clear()
         self._dedup_cache.clear()
         self._frame_count = 0
+        self._last_torso_length = None
+        self._last_body_center = None
+
+    def _check_skeleton_consistency(self, landmarks: np.ndarray) -> bool:
+        """
+        检查当前帧骨骼是否与前一帧一致（检测多人遮挡跳变）
+
+        Args:
+            landmarks: (33, 4) 当前帧关键点
+
+        Returns:
+            True 表示一致（正常），False 表示可能是遮挡或换人
+        """
+        # 计算当前帧的躯干长度和身体中心
+        sx = (landmarks[11, 0] + landmarks[12, 0]) / 2
+        sy = (landmarks[11, 1] + landmarks[12, 1]) / 2
+        hx = (landmarks[23, 0] + landmarks[24, 0]) / 2
+        hy = (landmarks[23, 1] + landmarks[24, 1]) / 2
+        torso = np.sqrt((sx - hx) ** 2 + (sy - hy) ** 2)
+        center = np.array([(sx + hx) / 2, (sy + hy) / 2])
+
+        if torso < 0.01:
+            return False  # 躯干长度异常
+
+        is_consistent = True
+
+        if self._last_torso_length is not None:
+            # 躯干尺度突变检测
+            scale_change = abs(torso - self._last_torso_length) / self._last_torso_length
+            if scale_change > 0.4:
+                is_consistent = False
+
+        if self._last_body_center is not None:
+            # 身体中心跳变检测
+            center_jump = np.sqrt(np.sum((center - self._last_body_center) ** 2))
+            if center_jump > 0.3:
+                is_consistent = False
+
+        # 更新记录（只在一致时更新，避免被错误帧污染）
+        if is_consistent:
+            self._last_torso_length = torso
+            self._last_body_center = center
+
+        return is_consistent
 
     def analyze_frame(
         self,
@@ -243,6 +323,18 @@ class RealtimeFeedbackEngine:
         """
         self._frame_count += 1
         now = time.time()
+
+        # ======== 骨骼一致性检测（方案B：实时模式适配） ========
+        if not self._check_skeleton_consistency(landmarks):
+            logger.debug(f"帧 {frame_index} 骨骼突变，跳过分析")
+            return FeedbackSnapshot(
+                has_pose=True,
+                window_similarity=0.0,
+                frame_index=frame_index,
+                timestamp=now,
+                buffer_size=len(self._frame_buffer),
+            )
+        # =====================================================
 
         # 缓存当前帧
         self._frame_buffer.append(landmarks.copy())
@@ -364,10 +456,9 @@ class RealtimeFeedbackEngine:
         if user_window.shape[0] < 2 or template_window.shape[0] < 2:
             return 0.0
 
-        # 转换为特征矩阵 — 只用 12 个核心关节点
-        core = CORE_JOINT_INDICES
-        user_feat = user_window[:, core, :3].reshape(user_window.shape[0], -1)
-        tmpl_feat = template_window[:, core, :3].reshape(template_window.shape[0], -1)
+        # 转换为特征矩阵 — 使用角度特征（位置无关）
+        user_feat = _window_to_angle_matrix(user_window)
+        tmpl_feat = _window_to_angle_matrix(template_window)
 
         try:
             distance, path, _ = compute_dtw(
@@ -376,10 +467,10 @@ class RealtimeFeedbackEngine:
                 metric="euclidean",
             )
 
-            # 归一化相似度
+            # 归一化相似度（使用高斯核映射，与离线模式一致）
             path_len = len(path) if path else 1
             norm_dist = distance / path_len
-            similarity = 1.0 / (1.0 + norm_dist)
+            similarity = float(np.exp(-(norm_dist ** 2) / (2 * 0.7 ** 2)))
             return similarity
 
         except Exception as e:

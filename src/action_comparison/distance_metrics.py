@@ -103,39 +103,36 @@ def sequence_to_feature_matrix(
     sequence,
     joint_indices: Optional[Sequence[int]] = None,
     normalize_body_scale: bool = True,
+    center_normalize: bool = True,
 ) -> np.ndarray:
     """
-    将 PoseSequence 转换为特征矩阵
+    将 PoseSequence 转换为角度特征矩阵
+
+    使用关节角度作为主特征：角度天然不受位置、视角、体型影响，
+    是区分不同动作最本质的特征。
 
     Args:
         sequence: PoseSequence 对象
-        joint_indices: 要使用的关节点索引，None 时用 CORE_JOINT_INDICES
-        normalize_body_scale: 是否按躯干长度归一化（消除体型差异）
+        joint_indices: （保留接口兼容，内部不使用）
+        normalize_body_scale: （保留接口兼容）
+        center_normalize: （保留接口兼容）
 
     Returns:
-        (T, num_joints * 3) ndarray
+        (T, num_angles) ndarray，每个元素是角度值 / 180（归一化到 [0,1]）
     """
-    if joint_indices is None:
-        joint_indices = CORE_JOINT_INDICES
+    from src.correction.angle_utils import AngleCalculator, ANGLE_DEFINITIONS
 
+    calc = AngleCalculator()
     T = sequence.num_frames
-    num_joints = len(joint_indices)
-    matrix = np.zeros((T, num_joints * 3), dtype=np.float64)
+    angle_names = list(ANGLE_DEFINITIONS.keys())
+    n_angles = len(angle_names)
+    matrix = np.zeros((T, n_angles), dtype=np.float64)
 
-    # 计算身体尺度因子（躯干长度：肩中点到髋中点）
-    scale_factor = 1.0
-    if normalize_body_scale:
-        scale_factor = _compute_body_scale(sequence)
-        if scale_factor < 0.05:
-            scale_factor = 1.0  # 兜底
-
-    for t, frame in enumerate(sequence.frames):
-        for k, j in enumerate(joint_indices):
-            if j < len(frame.landmarks):
-                lm = frame.landmarks[j]
-                matrix[t, k * 3] = lm.x / scale_factor
-                matrix[t, k * 3 + 1] = lm.y / scale_factor
-                matrix[t, k * 3 + 2] = lm.z / scale_factor
+    arr = sequence.to_numpy()  # (T, 33, 4)
+    for t in range(T):
+        angles = calc.compute_frame_angles(arr[t])
+        for k, name in enumerate(angle_names):
+            matrix[t, k] = angles[name] / 180.0  # 归一化到 [0,1]
 
     return matrix
 

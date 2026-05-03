@@ -1,13 +1,19 @@
 """
 矫正对比视频生成器
 
-沿 DTW 对齐路径生成逐帧骨骼对比视频，左右并排：
-- 左半：用户原始帧 + 偏差颜色骨骼叠加（🟢正常 🟡轻微 🔴需矫正）
-- 右半：同步的标准模板骨架动画（深色底）
-- 底部信息栏：帧号、评分、偏差值、矫正建议
+左右并排骨骼对比视频：
+- 左半：用户原始视频帧 + 骨骼叠加（按偏差着色）
+- 右半：模板骨架动画（深色底），DTW 对齐同步播放
+
+核心逻辑：
+- 用 PoseFrame.frame_index 精确匹配视频帧和骨骼数据（解决丢帧错位问题）
+- 右侧模板通过 DTW 对齐路径驱动：用户做到哪个动作，模板就展示对应帧
+- 动作段之外：模板暂停（首帧/末帧），让用户看清准备和收尾
+- 帧率不同、时长不同的情况：DTW 自动处理非线性时间扭曲
 """
 
 import logging
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -27,41 +33,34 @@ from .comparison import ComparisonResult
 
 logger = logging.getLogger(__name__)
 
-# ===== 偏差颜色映射（BGR） =====
-# 阈值基于归一化坐标 [0,1] 中的欧氏距离
-# 放宽阈值以使颜色分布更合理
-_THRESHOLD_MILD = 0.08     # < 8% 图像尺寸 → 绿色
-_THRESHOLD_MODERATE = 0.18  # 8%-18% → 黄色，> 18% → 红色
-COLOR_GOOD = (46, 204, 113)       # 绿色
-COLOR_MODERATE = (44, 156, 243)   # 黄色
-COLOR_BAD = (52, 73, 231)         # 红色
+# ===== 颜色常量（BGR） =====
+_THRESHOLD_MILD = 0.08
+_THRESHOLD_MODERATE = 0.18
+COLOR_GOOD = (46, 204, 113)
+COLOR_MODERATE = (44, 156, 243)
+COLOR_BAD = (52, 73, 231)
 COLOR_WHITE = (255, 255, 255)
-COLOR_GRAY = (160, 160, 160)      # 模板骨架灰色
-COLOR_BG = (35, 35, 40)           # 深灰背景
-COLOR_PANEL_BG = (28, 28, 32)     # 右侧面板背景
-COLOR_DIVIDER = (80, 80, 80)      # 分隔线
-COLOR_INFO_BG = (20, 22, 26)      # 底部信息栏背景
+COLOR_GRAY = (160, 160, 160)
+COLOR_BG = (35, 35, 40)
+COLOR_PANEL_BG = (28, 28, 32)
+COLOR_DIVIDER = (80, 80, 80)
+COLOR_INFO_BG = (20, 22, 26)
 
-# 关节绘制参数
 _RADIUS_RATIO = 0.009
 _THICKNESS_RATIO = 0.0035
-
-# 默认输出参数
 _DEFAULT_FPS = 15
 _DEFAULT_CODEC = "avc1"
 
-# ---- 中文关节名 → MediaPipe 索引 ----
+# 中文关节名 → MediaPipe 索引
 _CHINESE_NAME_TO_INDEX: Dict[str, int] = {}
 for _idx, _cn_name in CORE_JOINT_NAMES.items():
     _CHINESE_NAME_TO_INDEX[_cn_name] = _idx
-# 也支持英文名回退
 for _idx, _en_name in enumerate(LANDMARK_NAMES):
     if _idx in CORE_JOINT_INDICES and _en_name not in _CHINESE_NAME_TO_INDEX:
         _CHINESE_NAME_TO_INDEX[_en_name] = _idx
 
 
 def _get_joint_color(deviation: float) -> Tuple[int, int, int]:
-    """根据偏差值返回 BGR 颜色"""
     if deviation < _THRESHOLD_MILD:
         return COLOR_GOOD
     elif deviation < _THRESHOLD_MODERATE:
@@ -70,20 +69,84 @@ def _get_joint_color(deviation: float) -> Tuple[int, int, int]:
         return COLOR_BAD
 
 
+def _build_direct_dtw_map(
+    user_sequence: PoseSequence,
+    template_sequence: PoseSequence,
+) -> Tuple[Dict[int, int], int, int]:
+    """
+    在完整序列上运行子序列 DTW，构建帧映射。
+
+    不对任何序列做 extract_action_segment 裁剪——让子序列 DTW
+    自己找到模板在用户序列中的最佳匹配段。
+
+    Args:
+        user_sequence: 原始用户 PoseSequence（含 video frame_index）
+        template_sequence: 原始模板 PoseSequence（完整使用）
+
+    Returns:
+        (frame_map, match_start, match_end)
+        - frame_map: {user_seq_local_idx: template_seq_local_idx}
+        - match_start: DTW 匹配段在 user_sequence 中的起始本地索引
+        - match_end:   DTW 匹配段在 user_sequence 中的结束本地索引
+    """
+    from src.action_comparison.distance_metrics import sequence_to_feature_matrix
+    from src.action_comparison.dtw_algorithms import compute_dtw
+
+    user_n = user_sequence.num_frames
+    tpl_n = template_sequence.num_frames
+
+    if user_n < 3 or tpl_n < 3:
+        logger.warning("帧数不足，回退线性映射")
+        return {}, 0, user_n - 1
+
+    # 1. 构建特征矩阵（身体比例归一化）——两个序列都不裁剪
+    user_feat = sequence_to_feature_matrix(user_sequence, normalize_body_scale=True)
+    tpl_feat = sequence_to_feature_matrix(template_sequence, normalize_body_scale=True)
+
+    # 2. 子序列 DTW：在完整用户序列中寻找模板的最佳匹配段
+    try:
+        _, path, _ = compute_dtw(
+            user_feat, tpl_feat,
+            algorithm="dtw",
+            metric="euclidean",
+            use_subsequence=True,
+        )
+    except Exception as e:
+        logger.warning(f"DTW 计算失败: {e}，回退线性映射")
+        return {}, 0, user_n - 1
+
+    if not path:
+        return {}, 0, user_n - 1
+
+    # 3. 提取 DTW 匹配段在用户序列中的范围
+    match_start = min(p[0] for p in path)
+    match_end = max(p[0] for p in path)
+
+    # 4. 构建帧映射：user_seq 本地索引 → 完整模板索引
+    q_to_t_list: Dict[int, List[int]] = defaultdict(list)
+    for q, t in path:
+        q_to_t_list[q].append(t)
+
+    frame_map: Dict[int, int] = {}
+    for q, t_list in q_to_t_list.items():
+        frame_map[q] = int(np.median(t_list))
+
+    logger.info(
+        f"DTW 帧映射: {len(frame_map)} 对, "
+        f"用户={user_n}帧, 模板={tpl_n}帧（均完整使用）, "
+        f"匹配段=[{match_start}, {match_end}], 路径长度={len(path)}"
+    )
+
+    return frame_map, match_start, match_end
+
+
 def _build_deviation_map(
     joint_deviations: Dict[str, float]
 ) -> Dict[int, Tuple[float, Tuple[int, int, int]]]:
-    """
-    构建 关节索引 → (偏差, 颜色) 映射
-
-    joint_deviations 的 key 可能是中文名（"左肩"）或英文名（"left_shoulder"），
-    通过 _CHINESE_NAME_TO_INDEX 统一转为 MediaPipe 索引。
-    """
     result: Dict[int, Tuple[float, Tuple[int, int, int]]] = {}
     for name, dev in joint_deviations.items():
         idx = _CHINESE_NAME_TO_INDEX.get(name)
         if idx is None:
-            # 尝试英文名
             try:
                 idx = LANDMARK_NAMES.index(name)
             except ValueError:
@@ -108,18 +171,28 @@ def generate_comparison_video(
     """
     生成左右并排的骨骼对比视频
 
+    左侧：用户原始视频 + 骨骼叠加（精确按 frame_index 匹配）
+    右侧：模板骨架动画（DTW 对齐驱动）
+      - 用户准备阶段（未开始运动）→ 模板暂停在首帧
+      - 用户动作阶段 → 模板由 DTW 对齐路径驱动，与用户动作节奏同步
+      - 用户结束阶段 → 模板暂停在末帧
+      - 丢帧时 → 模板保持在上一个有效位置
+
+    帧率不同 / 时长不同的处理：
+      DTW 自动处理非线性时间扭曲，用户动作快时模板也快，
+      动作慢时模板也慢，确保两边同一时刻展示对应的动作姿态。
+
     Args:
         video_path: 用户原始视频路径
-        user_sequence: 用户 PoseSequence（可能已裁剪）
+        user_sequence: 用户 PoseSequence（姿态估计原始输出）
         template_sequence: 模板 PoseSequence
-        comparison_result: DTW 对比结果（含对齐路径 path）
+        comparison_result: DTW 对比结果
         joint_deviations: 关节偏差 {name: deviation}
         output_path: 输出 MP4 路径
         fps: 输出帧率
         quality_score: 质量评分 [0, 100]
         corrections: 矫正建议列表
         progress_callback: fn(current, total)
-        video_start_frame: 视频读取起始帧偏移（裁剪场景）
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,49 +203,37 @@ def generate_comparison_video(
         logger.error(f"无法打开视频: {video_path}")
         return None
 
-    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     video_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     video_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # ---- 2. 构建 DTW 对齐映射 ----
-    # 关键：DTW 路径的索引对应的是归一化后 60 帧的序列，不是原始帧。
-    # 需要做 原始帧 → 归一化帧 → DTW路径 → 模板归一化帧 → 模板原始帧 的映射。
-    path = comparison_result.path
-    DTW_NORM_FRAMES = 60  # 与 preprocessing 默认 target_frames 一致
+    # ---- 2. 构建 frame_index → PoseFrame 查找表 ----
+    user_pose_lookup: Dict[int, PoseFrame] = {}
+    for frame in user_sequence.frames:
+        user_pose_lookup[frame.frame_index] = frame
 
-    user_orig_total = user_sequence.num_frames
-    tpl_orig_total = template_sequence.num_frames
+    # ---- 3. 在完整序列上跑子序列 DTW，让 DTW 自己找匹配段 ----
+    #     不预先裁剪任何序列，避免 extract_action_segment 过激裁剪
+    #     导致 user_cropped < tpl_full 时子序列 DTW 退化为经典 DTW
+    dtw_frame_map, match_start, match_end = _build_direct_dtw_map(
+        user_sequence, template_sequence
+    )
 
-    # norm_user_idx → norm_tpl_idx
-    norm_user_to_tpl: Dict[int, int] = {}
-    for norm_u, norm_t in path:
-        norm_user_to_tpl[norm_u] = norm_t
-
-    # original_user_idx → original_tpl_idx
-    def _orig_to_tpl(orig_user_idx: int) -> Optional[int]:
-        """将原始用户帧索引映射到原始模板帧索引"""
-        if user_orig_total <= 0 or tpl_orig_total <= 0:
-            return None
-        norm_u = min(DTW_NORM_FRAMES - 1, int(orig_user_idx * DTW_NORM_FRAMES / user_orig_total))
-        norm_t = norm_user_to_tpl.get(norm_u)
-        if norm_t is None:
-            return None
-        return min(tpl_orig_total - 1, int(norm_t * tpl_orig_total / DTW_NORM_FRAMES))
-
-    # ---- 3. 准备模板骨架数据 ----
-    tpl_frames_data: Dict[int, List[Tuple[float, float, float, float]]] = {}
-    for i, frame in enumerate(template_sequence.frames):
-        tpl_data = []
+    # ---- 4. 准备模板骨架数据（完整使用） ----
+    tpl_landmarks_list: List[List[Tuple[float, float, float, float]]] = []
+    for frame in template_sequence.frames:
+        lm_data = []
         for lm in frame.landmarks:
-            tpl_data.append((lm.x, lm.y, lm.z, lm.visibility))
-        tpl_frames_data[i] = tpl_data
+            lm_data.append((lm.x, lm.y, lm.z, lm.visibility))
+        tpl_landmarks_list.append(lm_data)
 
-    # ---- 4. 构建偏差颜色映射 ----
+    tpl_total = len(tpl_landmarks_list)
+
+    # ---- 5. 偏差颜色映射 ----
     joint_deviation_map = _build_deviation_map(joint_deviations)
     logger.info(f"偏差关节映射: {len(joint_deviation_map)} 个关节")
 
-    # ---- 5. 准备矫正建议 ----
+    # ---- 6. 矫正建议 ----
     correction_lines: List[str] = []
     if corrections:
         for c in corrections[:8]:
@@ -181,15 +242,12 @@ def generate_comparison_video(
             elif hasattr(c, 'description'):
                 correction_lines.append(str(c.description))
 
-    # ---- 6. 确定输出布局 ----
-    # 左侧：用户视频，右侧：模板骨架面板（等宽）
-    panel_w = video_w  # 左右各占原始视频宽度
+    # ---- 7. 输出布局 ----
     info_bar_h = int(video_h * 0.16)
-    output_w = video_w * 2  # 左右并排
+    output_w = video_w * 2
     output_h = video_h + info_bar_h
-    divider_x = video_w     # 分隔线 X 坐标
 
-    # ---- 7. 写入视频 ----
+    # ---- 8. 创建视频写入器 ----
     fourcc = cv2.VideoWriter_fourcc(*_DEFAULT_CODEC)
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (output_w, output_h))
     if not writer.isOpened():
@@ -200,69 +258,134 @@ def generate_comparison_video(
             logger.error(f"无法创建输出视频: {output_path}")
             return None
 
-    # ---- 8. 逐帧生成 ----
-    frame_count = min(total_video_frames, user_sequence.num_frames)
+    # ---- 9. 逐帧生成 ----
+    frame_count = total_video_frames
     step = max(1, frame_count // 100)
+    written = 0
+    last_tpl_idx = 0
 
-    for user_idx in range(frame_count):
+    # 将 DTW 匹配段的 user_seq 本地索引映射到 video frame_index
+    # match_start / match_end 是 user_sequence 中的本地序号
+    match_first_video_frame = (
+        user_sequence.frames[match_start].frame_index
+        if 0 <= match_start < user_sequence.num_frames else 0
+    )
+    match_last_video_frame = (
+        user_sequence.frames[min(match_end, user_sequence.num_frames - 1)].frame_index
+        if match_end >= match_start else frame_count
+    )
+
+    # 建立 user_seq 本地索引 → video frame_index 的快速查找
+    seq_idx_to_video: Dict[int, int] = {}
+    for seq_i, frame in enumerate(user_sequence.frames):
+        seq_idx_to_video[seq_i] = frame.frame_index
+
+    logger.info(
+        f"DTW 匹配段: user_seq[{match_start}..{match_end}], "
+        f"video帧 [{match_first_video_frame}..{match_last_video_frame}]"
+    )
+
+    for video_frame_idx in range(frame_count):
         ret, raw_frame = cap.read()
         if not ret:
             break
 
-        # 创建画布
         canvas = np.full((output_h, output_w, 3), COLOR_BG, dtype=np.uint8)
 
-        # -- 左半：用户视频 --
+        # ============ 左半：用户视频 + 骨骼 ============
         canvas[:video_h, :video_w] = raw_frame
 
-        # 绘制用户骨骼
-        if user_idx < user_sequence.num_frames:
-            user_pose = user_sequence.frames[user_idx]
+        user_pose = user_pose_lookup.get(video_frame_idx, None)
+        if user_pose is not None:
             _draw_skeleton_on_region(
                 canvas, user_pose, 0, 0, video_w, video_h,
                 joint_deviation_map, is_template=False,
             )
 
-        # 标签
         cv2.putText(canvas, "Your Action", (8, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_WHITE, 2)
 
-        # -- 右半：模板骨架（DTW 对齐）--
-        # 右边填充面板背景
+        # ============ 右半：模板骨架（DTW 子序列匹配驱动） ============
         canvas[:video_h, video_w:output_w] = COLOR_PANEL_BG
 
-        tpl_idx = _orig_to_tpl(user_idx)
-        # 无匹配时显示模板首帧作为静态参考姿势
-        if tpl_idx is None and 0 in tpl_frames_data:
-            tpl_idx = 0
+        # 找到当前视频帧在 user_sequence 中的本地索引
+        user_seq_idx = None
+        for seq_i, frame in enumerate(user_sequence.frames):
+            if frame.frame_index == video_frame_idx:
+                user_seq_idx = seq_i
+                break
 
-        if tpl_idx is not None and tpl_idx in tpl_frames_data:
-            _draw_skeleton_on_region(
-                canvas, None, video_w, 0, video_w, video_h,
-                joint_deviation_map=None, is_template=True,
-                tpl_landmarks=tpl_frames_data[tpl_idx],
-            )
+        # ---- 三阶段：匹配前暂停 / 匹配中 DTW 同步 / 匹配后暂停 ----
+        if user_seq_idx is not None and dtw_frame_map:
+            if user_seq_idx < match_start:
+                # 匹配前 → 模板停在首帧
+                tpl_idx = 0
+                phase_label = "Ready"
+                phase_color = (120, 120, 120)
+            elif user_seq_idx > match_end:
+                # 匹配后 → 模板停在末帧
+                tpl_idx = tpl_total - 1
+                phase_label = "Done"
+                phase_color = (100, 180, 100)
+            else:
+                # 匹配段内 → DTW 对齐（frame_map 键是 user_seq 本地索引）
+                if user_seq_idx in dtw_frame_map:
+                    tpl_idx = dtw_frame_map[user_seq_idx]
+                else:
+                    # 最近邻
+                    all_keys = sorted(dtw_frame_map.keys())
+                    nearest = min(all_keys, key=lambda k: abs(k - user_seq_idx))
+                    tpl_idx = dtw_frame_map[nearest]
+                tpl_idx = max(0, min(tpl_idx, tpl_total - 1))
+                phase_label = "Synced"
+                phase_color = (255, 180, 60)
+        elif user_seq_idx is not None:
+            # 无 DTW 映射 → 线性回退
+            if video_frame_idx < match_first_video_frame:
+                tpl_idx = 0
+                phase_label = "Ready"
+                phase_color = (120, 120, 120)
+            elif video_frame_idx > match_last_video_frame:
+                tpl_idx = tpl_total - 1
+                phase_label = "Done"
+                phase_color = (100, 180, 100)
+            else:
+                progress = (video_frame_idx - match_first_video_frame) / max(match_last_video_frame - match_first_video_frame, 1)
+                tpl_idx = int(progress * (tpl_total - 1))
+                tpl_idx = max(0, min(tpl_idx, tpl_total - 1))
+                phase_label = "Linear"
+                phase_color = (180, 140, 60)
+        else:
+            tpl_idx = last_tpl_idx
+            phase_label = "Hold"
+            phase_color = (100, 100, 100)
 
-        # 标签
-        state_text = "Template (static)" if (_orig_to_tpl(user_idx) is None and 0 in tpl_frames_data) else "Template (DTW matched)"
-        cv2.putText(canvas, state_text, (video_w + 8, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_GRAY, 2)
+        last_tpl_idx = tpl_idx
 
-        # 显示模板帧号
-        if tpl_idx is not None:
-            tpl_text = f"Tpl frame: {tpl_idx + 1}/{tpl_orig_total}"
-            (tw, _), _ = cv2.getTextSize(tpl_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
-            cv2.putText(canvas, tpl_text,
-                        (output_w - tw - 8, 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_GRAY, 1)
+        # 绘制模板骨骼
+        _draw_skeleton_on_region(
+            canvas, None, video_w, 0, video_w, video_h,
+            joint_deviation_map=None, is_template=True,
+            tpl_landmarks=tpl_landmarks_list[tpl_idx],
+        )
 
-        # -- 中间分隔线 --
-        cv2.line(canvas, (divider_x, 0), (divider_x, video_h), COLOR_DIVIDER, 2)
+        cv2.putText(canvas, f"Template [{phase_label}]", (video_w + 8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, phase_color, 2)
 
-        # -- 底部信息栏 --
+        # 模板帧号
+        tpl_text = f"{tpl_idx + 1}/{tpl_total}"
+        (tw, _), _ = cv2.getTextSize(tpl_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+        cv2.putText(canvas, tpl_text,
+                    (output_w - tw - 8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_GRAY, 1)
+
+        # ============ 中间分隔线 ============
+        cv2.line(canvas, (video_w, 0), (video_w, video_h), COLOR_DIVIDER, 2)
+
+        # ============ 底部信息栏 ============
         _draw_info_bar(
             canvas, video_h, output_w, output_h,
-            user_idx=user_idx, total_frames=frame_count,
+            user_idx=video_frame_idx, total_frames=frame_count,
             quality_score=quality_score,
             joint_deviations=joint_deviations,
             correction_lines=correction_lines,
@@ -270,15 +393,86 @@ def generate_comparison_video(
         )
 
         writer.write(canvas)
+        written += 1
 
-        if progress_callback and user_idx % step == 0:
-            progress_callback(user_idx + 1, frame_count)
+        if progress_callback and video_frame_idx % step == 0:
+            progress_callback(video_frame_idx + 1, frame_count)
 
     cap.release()
     writer.release()
 
-    logger.info(f"对比视频已生成: {output_path} ({frame_count} 帧, {output_w}x{output_h})")
+    logger.info(
+        f"对比视频已生成: {output_path} ({written} 帧, {output_w}x{output_h}), "
+        f"DTW匹配段: user_seq[{match_start}..{match_end}], 模板{ tpl_total}帧完整"
+    )
     return str(output_path)
+
+
+def _detect_action_range(
+    user_sequence: PoseSequence,
+    total_video_frames: int,
+) -> Tuple[int, int]:
+    """
+    检测用户视频中动作发生的帧区间（在原始视频帧空间上）
+
+    通过计算逐帧运动能量定位动作的起止位置。
+
+    Returns:
+        (action_start_frame, action_end_frame) 原始视频帧索引
+    """
+    T = user_sequence.num_frames
+    if T < 5:
+        return (0, total_video_frames - 1)
+
+    # 收集每帧的 frame_index 和运动能量
+    frame_indices = []
+    for frame in user_sequence.frames:
+        frame_indices.append(frame.frame_index)
+
+    # 计算相邻帧的运动能量
+    arr = user_sequence.to_numpy()  # (T, 33, 4)
+    core_joints = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
+
+    energy = np.zeros(T, dtype=np.float64)
+    for t in range(1, T):
+        diff = arr[t, core_joints, :3] - arr[t - 1, core_joints, :3]
+        energy[t] = np.mean(np.sqrt(np.sum(diff ** 2, axis=1)))
+
+    # 平滑
+    if T >= 5:
+        kernel = np.ones(5) / 5
+        energy = np.convolve(energy, kernel, mode='same')
+
+    # 阈值：中位数的 0.5 倍，最低 0.001
+    threshold = max(np.median(energy) * 0.5, 0.001)
+
+    # 找到第一个超过阈值的帧和最后一个超过阈值的帧
+    above = energy > threshold
+    first_active = None
+    last_active = None
+    for i in range(T):
+        if above[i]:
+            if first_active is None:
+                first_active = i
+            last_active = i
+
+    if first_active is None:
+        # 没有检测到明显运动，使用全部帧
+        return (0, total_video_frames - 1)
+
+    # 前后留一点余量（3帧）
+    first_active = max(0, first_active - 3)
+    last_active = min(T - 1, last_active + 3)
+
+    # 映射回原始视频帧索引
+    action_start = frame_indices[first_active]
+    action_end = frame_indices[last_active]
+
+    # 保证合理范围
+    action_start = max(0, action_start)
+    action_end = min(total_video_frames - 1, action_end)
+
+    return (action_start, action_end)
 
 
 def _draw_skeleton_on_region(
@@ -290,28 +484,20 @@ def _draw_skeleton_on_region(
     is_template: bool = False,
     tpl_landmarks: Optional[List[Tuple[float, float, float, float]]] = None,
 ):
-    """
-    在画布的指定区域绘制骨骼
-
-    - 用户模式：按偏差着色，关键点 + 连线
-    - 模板模式：灰色骨架
-    """
+    """在画布指定区域绘制骨骼"""
     radius = max(2, int(region_h * _RADIUS_RATIO))
     thickness = max(1, int(region_h * _THICKNESS_RATIO))
 
-    # 构建像素坐标
     px: Dict[int, Tuple[int, int]] = {}
     vis: Dict[int, float] = {}
 
     if is_template and tpl_landmarks is not None:
-        # 模板模式：从传入的坐标列表绘制
         for idx in DISPLAY_JOINT_INDICES:
             if idx < len(tpl_landmarks):
                 x, y, _, v = tpl_landmarks[idx]
                 px[idx] = (offset_x + int(x * region_w), offset_y + int(y * region_h))
                 vis[idx] = v
     elif pose is not None:
-        # 用户模式：从 PoseFrame 绘制
         landmarks = pose.landmarks
         for idx in DISPLAY_JOINT_INDICES:
             if idx < len(landmarks):
@@ -323,35 +509,38 @@ def _draw_skeleton_on_region(
     if not px:
         return
 
-    # 获取颜色函数
+    # 颜色
     if is_template:
-        joint_color = COLOR_GRAY
-        conn_color = (100, 100, 100)
+        joint_c = COLOR_GRAY
+        conn_c = (100, 100, 100)
     else:
-        def joint_color(idx: int):
-            if joint_deviation_map and idx in joint_deviation_map:
-                return joint_deviation_map[idx][1]
-            return COLOR_GOOD
+        joint_c = None
+        conn_c = None
 
-        def conn_color(idx_a: int, idx_b: int):
-            if joint_deviation_map:
-                da = joint_deviation_map.get(idx_a, (0, COLOR_GOOD))[0]
-                db = joint_deviation_map.get(idx_b, (0, COLOR_GOOD))[0]
-                return _get_joint_color((da + db) / 2)
-            return COLOR_GOOD
-
-    # 绘制连线
+    # 连线
     for a, b in DISPLAY_CONNECTIONS:
         if a in px and b in px and vis.get(a, 0) > VISIBILITY_THRESHOLD and vis.get(b, 0) > VISIBILITY_THRESHOLD:
-            color = conn_color if not is_template else conn_color
-            if not is_template:
-                color = conn_color(a, b)
+            if is_template:
+                color = conn_c
+            else:
+                if joint_deviation_map:
+                    da = joint_deviation_map.get(a, (0, COLOR_GOOD))[0]
+                    db = joint_deviation_map.get(b, (0, COLOR_GOOD))[0]
+                    color = _get_joint_color((da + db) / 2)
+                else:
+                    color = COLOR_GOOD
             cv2.line(canvas, px[a], px[b], color, thickness)
 
-    # 绘制关键点
+    # 关键点
     for idx in DISPLAY_JOINT_INDICES:
         if idx in px and vis.get(idx, 0) > VISIBILITY_THRESHOLD:
-            color = joint_color if is_template else joint_color(idx)
+            if is_template:
+                color = joint_c
+            else:
+                if joint_deviation_map and idx in joint_deviation_map:
+                    color = joint_deviation_map[idx][1]
+                else:
+                    color = COLOR_GOOD
             cv2.circle(canvas, px[idx], radius, color, -1)
             cv2.circle(canvas, px[idx], radius, COLOR_WHITE, 1)
 
@@ -365,19 +554,18 @@ def _draw_info_bar(
     correction_lines: List[str],
     joint_deviation_map: Dict[int, Tuple[float, Tuple[int, int, int]]],
 ):
-    """绘制底部信息栏（纯 ASCII，避免 OpenCV 中文乱码）"""
+    """绘制底部信息栏"""
     bar_top = frame_top
-    bar_h = canvas_h - frame_top
 
-    # 背景
     cv2.rectangle(canvas, (0, bar_top), (canvas_w, canvas_h), COLOR_INFO_BG, -1)
     cv2.line(canvas, (0, bar_top), (canvas_w, bar_top), COLOR_DIVIDER, 1)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
     x_margin = 10
+    bar_h = canvas_h - frame_top
     line_h = max(14, bar_h // 4)
 
-    # ---- 第1行：帧号 + 评分 ----
+    # 第1行：帧号 + 评分
     y = bar_top + line_h + 2
     cv2.putText(canvas, f"Frame: {user_idx + 1}/{total_frames}",
                 (x_margin, y), font, 0.4, COLOR_WHITE, 1)
@@ -387,13 +575,12 @@ def _draw_info_bar(
     cv2.putText(canvas, score_text,
                 (canvas_w // 2 - 50, y), font, 0.45, score_color, 1)
 
-    # 图例
     legend_x = canvas_w - 260
     cv2.putText(canvas, "G:OK", (legend_x, y), font, 0.35, COLOR_GOOD, 1)
     cv2.putText(canvas, "Y:Mild", (legend_x + 60, y), font, 0.35, COLOR_MODERATE, 1)
     cv2.putText(canvas, "R:Bad", (legend_x + 130, y), font, 0.35, COLOR_BAD, 1)
 
-    # ---- 第2行：偏差最大的关节（英文缩写）----
+    # 第2行：偏差关节
     y += line_h
     if joint_deviations:
         sorted_items = sorted(joint_deviations.items(), key=lambda x: x[1], reverse=True)[:8]
@@ -403,27 +590,24 @@ def _draw_info_bar(
             tag = "G" if dev < _THRESHOLD_MILD else ("Y" if dev < _THRESHOLD_MODERATE else "R")
             parts.append(f"[{tag}]{short}:{dev:.3f}")
         text = " | ".join(parts)
-        max_chars = 130
-        if len(text) > max_chars:
-            text = text[:max_chars - 3] + "..."
+        if len(text) > 130:
+            text = text[:127] + "..."
         cv2.putText(canvas, text, (x_margin, y), font, 0.32, (190, 190, 190), 1)
 
-    # ---- 第3行：矫正建议轮播（过滤中文） ----
+    # 第3行：矫正建议
     y += line_h
     if correction_lines:
         line_idx = (user_idx // 40) % len(correction_lines)
         text = _sanitize_ascii(correction_lines[line_idx])
-        max_chars = 140
-        if len(text) > max_chars:
-            text = text[:max_chars - 3] + "..."
+        if len(text) > 140:
+            text = text[:137] + "..."
         cv2.putText(canvas, f"> {text}",
                     (x_margin, y), font, 0.33, (180, 210, 255), 1)
 
 
 def _short_joint_name(name: str) -> str:
-    """将关节名转为简短 ASCII 缩写"""
     mapping = {
-        "nose": "nose",
+        "nose": "nose", "鼻子": "nose",
         "左肩": "L.Shd", "left_shoulder": "L.Shd",
         "右肩": "R.Shd", "right_shoulder": "R.Shd",
         "左肘": "L.Elb", "left_elbow": "L.Elb",
@@ -440,17 +624,15 @@ def _short_joint_name(name: str) -> str:
         "右脚跟": "R.Heel", "right_heel": "R.Heel",
         "左脚尖": "L.Toe", "left_foot_index": "L.Toe",
         "右脚尖": "R.Toe", "right_foot_index": "R.Toe",
-        "鼻子": "nose",
     }
     return mapping.get(name, name[:6])
 
 
 def _sanitize_ascii(text: str) -> str:
-    """过滤非 ASCII 字符，保留英文/数字/标点"""
     return ''.join(c if ord(c) < 128 else '?' for c in text)
 
 
-# ===== 保留从 numpy 数组生成的接口 =====
+# ===== 兼容接口：从 numpy 数组生成 =====
 
 def generate_comparison_video_from_arrays(
     user_frames: np.ndarray,
@@ -464,7 +646,7 @@ def generate_comparison_video_from_arrays(
     fps: float = _DEFAULT_FPS,
     progress_callback=None,
 ) -> Optional[str]:
-    """从 numpy 数组生成对比视频（用于摄像头录制模式）"""
+    """从 numpy 数组生成对比视频"""
     user_seq = PoseSequence(fps=fps)
     for i in range(user_frames.shape[0]):
         landmarks = []
@@ -501,4 +683,3 @@ def generate_comparison_video_from_arrays(
         corrections=corrections,
         progress_callback=progress_callback,
     )
-

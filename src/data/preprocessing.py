@@ -71,7 +71,12 @@ def interpolate_missing(
                 valid_indices, values,
                 kind='linear', fill_value='extrapolate'
             )
-            result[missing_indices, j, ch] = interp_func(missing_indices)
+            interpolated = interp_func(missing_indices)
+            # 防护：外推可能产生 NaN/Inf，用最近有效值替代
+            bad = ~np.isfinite(interpolated)
+            if bad.any():
+                interpolated[bad] = np.mean(values)
+            result[missing_indices, j, ch] = interpolated
 
         # 将缺失帧的 visibility 设为阈值
         result[missing_indices, j, 3] = visibility_threshold
@@ -88,6 +93,7 @@ def smooth_sequence(
     使用 Savitzky-Golay 滤波器对关键点序列平滑去噪
 
     对每个关键点的 x, y, z 通道分别进行滤波。
+    含有 NaN/Inf 的通道会先填充再滤波。
 
     Args:
         sequence: 输入姿态序列
@@ -108,8 +114,18 @@ def smooth_sequence(
 
     for j in range(NUM_LANDMARKS):
         for ch in range(3):  # x, y, z
+            channel = arr[:, j, ch].copy()
+            # 防护：处理 NaN/Inf 值
+            bad_mask = ~np.isfinite(channel)
+            if bad_mask.any():
+                if bad_mask.all():
+                    # 全部无效，跳过滤波
+                    continue
+                # 用有效值的均值填充无效位置
+                valid_mean = np.nanmean(channel[~bad_mask])
+                channel[bad_mask] = valid_mean
             result[:, j, ch] = savgol_filter(
-                arr[:, j, ch], window_length, polyorder
+                channel, window_length, polyorder
             )
 
     return _array_to_sequence(result, sequence)
@@ -212,16 +228,118 @@ def preprocess_pipeline(
     return result
 
 
+def filter_skeleton_outliers(
+    sequence: PoseSequence,
+    scale_jump_threshold: float = 0.4,
+    position_jump_threshold: float = 0.3,
+) -> PoseSequence:
+    """
+    过滤骨骼突变帧（多人遮挡干扰检测）
+
+    当检测到躯干尺度或身体中心位置的帧间突变超过阈值时，
+    认为该帧检测到了错误的人物（如遮挡者），将其标记为无效。
+
+    原理：
+    - 同一个人的躯干长度（肩中点到髋中点）在相邻帧之间变化极小
+    - 同一个人的身体中心位置不会突然跳变
+    - 遮挡或换人会导致这两个指标突变
+
+    Args:
+        sequence: 输入姿态序列
+        scale_jump_threshold: 躯干尺度变化率阈值（相对值），超过此值视为突变
+        position_jump_threshold: 身体中心跳变阈值（归一化坐标距离）
+
+    Returns:
+        过滤后的新 PoseSequence（移除了异常帧）
+    """
+    T = sequence.num_frames
+    if T < 3:
+        return sequence
+
+    # 计算每帧的躯干长度和身体中心
+    torso_lengths = np.zeros(T, dtype=np.float64)
+    body_centers = np.zeros((T, 2), dtype=np.float64)
+
+    for t, frame in enumerate(sequence.frames):
+        lm = frame.landmarks
+        if len(lm) <= 24:
+            continue
+        # 肩中点
+        sx = (lm[11].x + lm[12].x) / 2
+        sy = (lm[11].y + lm[12].y) / 2
+        # 髋中点
+        hx = (lm[23].x + lm[24].x) / 2
+        hy = (lm[23].y + lm[24].y) / 2
+        torso_lengths[t] = np.sqrt((sx - hx) ** 2 + (sy - hy) ** 2)
+        body_centers[t] = [(sx + hx) / 2, (sy + hy) / 2]
+
+    # 计算中位数躯干长度作为基准
+    valid_torsos = torso_lengths[torso_lengths > 0.01]
+    if len(valid_torsos) < 3:
+        return sequence
+    median_torso = np.median(valid_torsos)
+
+    # 标记有效帧
+    valid_mask = np.ones(T, dtype=bool)
+    for t in range(T):
+        # 检查躯干尺度是否偏离中位数太远
+        if torso_lengths[t] > 0.01:
+            scale_ratio = abs(torso_lengths[t] - median_torso) / median_torso
+            if scale_ratio > scale_jump_threshold:
+                valid_mask[t] = False
+                continue
+
+        # 检查与前一帧的身体中心跳变
+        if t > 0 and valid_mask[t - 1] and torso_lengths[t] > 0.01:
+            center_jump = np.sqrt(np.sum((body_centers[t] - body_centers[t - 1]) ** 2))
+            if center_jump > position_jump_threshold:
+                valid_mask[t] = False
+
+    # 构建过滤后的序列
+    removed_count = int(np.sum(~valid_mask))
+    if removed_count == 0:
+        return sequence
+
+    filtered = PoseSequence(fps=sequence.fps, metadata=dict(sequence.metadata))
+    filtered.metadata['skeleton_outliers_removed'] = removed_count
+    new_idx = 0
+    for t in range(T):
+        if valid_mask[t]:
+            # 重建连续帧索引和时间戳，避免后续插值出现NaN
+            old_frame = sequence.frames[t]
+            new_frame = PoseFrame(
+                timestamp=new_idx / sequence.fps,
+                frame_index=new_idx,
+                landmarks=old_frame.landmarks,
+            )
+            filtered.add_frame(new_frame)
+            new_idx += 1
+
+    logger.info(
+        f"骨骼突变过滤: {T}帧 → {filtered.num_frames}帧 "
+        f"(移除 {removed_count} 帧异常骨骼)"
+    )
+    return filtered
+
+
 def extract_action_segment(
     sequence: PoseSequence,
     min_frames: int = 10,
     smooth_window: int = 5,
+    energy_percentile: float = 25,
+    min_energy_threshold: float = 0.001,
 ) -> PoseSequence:
     """
-    从长视频序列中自动提取动作发生的片段
+    从长视频序列中自动提取动作发生的片段（增强版）
 
     通过计算逐帧运动能量（所有核心关节位移之和），
     找到连续高能量区域作为"动作片段"，剔除准备/收尾等无关帧。
+
+    增强点（相比初版）：
+    - 更智能的阈值策略：结合中位数和百分位数
+    - 支持合并相邻的高能量段（允许短暂停顿）
+    - 能量最高段优先（而非最长段）
+    - 可调参数更灵活
 
     原理：
     - 用户录制视频通常包含：站定准备 → 执行动作 → 站定收尾
@@ -232,6 +350,8 @@ def extract_action_segment(
         sequence: 完整视频的姿态序列
         min_frames: 最小帧数（低于此值不裁剪）
         smooth_window: 能量曲线平滑窗口
+        energy_percentile: 能量阈值百分位数
+        min_energy_threshold: 最小能量阈值
 
     Returns:
         裁剪后的 PoseSequence（如果无法检测则返回原序列）
@@ -259,7 +379,7 @@ def extract_action_segment(
             energy[t - 1] = np.mean(np.sqrt(np.sum((positions - prev_positions) ** 2, axis=1)))
         prev_positions = positions
 
-    if len(energy) == 0:
+    if len(energy) == 0 or np.max(energy) < 1e-6:
         return sequence
 
     # 2. 平滑能量曲线
@@ -267,37 +387,65 @@ def extract_action_segment(
         kernel = np.ones(smooth_window) / smooth_window
         energy = np.convolve(energy, kernel, mode='same')
 
-    # 3. 找到能量最高的连续区域
-    # 计算累积能量，用滑动窗口找最佳段
-    threshold = np.percentile(energy, 30)  # 30分位数作为基线
-    threshold = max(threshold, 0.002)  # 最小阈值
+    # 3. 智能阈值：使用中位数和百分位数的组合
+    median_energy = np.median(energy)
+    percentile_energy = np.percentile(energy, energy_percentile)
+    # 取两者中较小的，但不低于最小阈值
+    threshold = max(min(median_energy * 0.5, percentile_energy), min_energy_threshold)
 
     above = energy > threshold
-    # 找到所有连续的高能量段
+
+    # 4. 找到所有连续的高能量段，允许短暂间隙（合并相邻段）
+    gap_tolerance = max(3, int(T * 0.02))  # 允许的最大间隙帧数
     segments = []
     start = None
+    gap_count = 0
+
     for i, val in enumerate(above):
-        if val and start is None:
-            start = i
-        elif not val and start is not None:
-            if i - start >= min_frames:
-                segments.append((start, i))
-            start = None
-    if start is not None and T - 1 - start >= min_frames:
-        segments.append((start, T - 1))
+        if val:
+            if start is None:
+                start = i
+            gap_count = 0
+        else:
+            if start is not None:
+                gap_count += 1
+                if gap_count > gap_tolerance:
+                    end = i - gap_count
+                    if end - start >= min_frames // 2:  # 放宽最小段长度
+                        segments.append((start, end))
+                    start = None
+                    gap_count = 0
+
+    if start is not None:
+        end = len(above) if above[-1] else len(above) - gap_count
+        if end - start >= min_frames // 2:
+            segments.append((start, end))
 
     if not segments:
         return sequence  # 无有效片段，返回原序列
 
-    # 取最长的段
-    best = max(segments, key=lambda s: s[1] - s[0])
-    start_idx = max(0, best[0] - 3)   # 前留 3 帧余量
-    end_idx = min(T, best[1] + 4)     # 后留 4 帧余量
+    # 5. 选择最佳段：优先选能量最高的段（而非最长的）
+    def segment_score(seg):
+        s, e = seg
+        seg_energy = np.sum(energy[s:e])
+        seg_length = e - s
+        # 综合评分 = 总能量 × 长度权重（避免选太短的高能段）
+        length_weight = min(1.0, seg_length / (T * 0.3))
+        return seg_energy * (0.5 + 0.5 * length_weight)
 
+    best = max(segments, key=segment_score)
+    start_idx = max(0, best[0] - 5)   # 前留 5 帧余量
+    end_idx = min(T, best[1] + 6)     # 后留 6 帧余量
+
+    # 如果裁剪后长度不够或裁剪比例太小（几乎没裁剪），返回原序列
     if end_idx - start_idx < min_frames:
         return sequence
 
-    # 4. 构建裁剪后的序列
+    # 如果裁剪后还是几乎全部帧，没必要裁剪
+    if (end_idx - start_idx) >= T * 0.95:
+        return sequence
+
+    # 6. 构建裁剪后的序列
     cropped = PoseSequence(fps=sequence.fps, metadata=dict(sequence.metadata))
     cropped.metadata['cropped_from'] = (start_idx, end_idx)
     cropped.metadata['original_frames'] = T
@@ -308,7 +456,8 @@ def extract_action_segment(
 
     logger.info(
         f"动作片段提取: {T}帧 → {cropped.num_frames}帧 "
-        f"(帧 {start_idx}-{end_idx})"
+        f"(帧 {start_idx}-{end_idx}, "
+        f"能量阈值={threshold:.4f})"
     )
     return cropped
 

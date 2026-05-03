@@ -11,7 +11,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.pose_estimation.data_types import PoseSequence
-from src.data.preprocessing import preprocess_pipeline
+from src.data.preprocessing import (
+    preprocess_pipeline,
+    extract_action_segment,
+    filter_skeleton_outliers,
+)
 from src.data.template_library import TemplateLibrary
 
 from .distance_metrics import sequence_to_feature_matrix
@@ -61,6 +65,7 @@ class ActionComparator:
         window_size: Optional[int] = None,
         preprocess: bool = True,
         target_frames: Optional[int] = 60,
+        similarity_sigma: float = 0.7,
     ):
         """
         Args:
@@ -69,12 +74,15 @@ class ActionComparator:
             window_size: Sakoe-Chiba 带宽约束
             preprocess: 对比前是否预处理序列
             target_frames: 预处理时的归一化帧数 (None 不重采样)
+            similarity_sigma: 高斯相似度映射的 sigma 参数，
+                             控制容忍度（越大越宽容，推荐 0.5~1.0）
         """
         self._algorithm = algorithm
         self._metric = metric
         self._window_size = window_size
         self._preprocess = preprocess
         self._target_frames = target_frames
+        self._similarity_sigma = similarity_sigma
 
     def compare(
         self,
@@ -93,15 +101,41 @@ class ActionComparator:
         Returns:
             ComparisonResult
         """
-        # 记录原始帧数比（预处理前），用于子序列 DTW 决策
-        orig_q_frames = query.num_frames
-        orig_t_frames = template.num_frames
-        orig_ratio = orig_q_frames / max(orig_t_frames, 1)
+        # 记录原始帧数——预处理会压缩，必须按比例保留差异
+        orig_q = query.num_frames
+        orig_t = template.num_frames
 
-        # 预处理
+        # ======== 预处理前先过滤骨骼突变帧 + 提取动作片段 ========
+        # 1. 过滤多人遮挡导致的骨骼突变帧
+        query = filter_skeleton_outliers(query)
+        template = filter_skeleton_outliers(template)
+
+        # 2. 自动提取动作片段，剔除无关准备/收尾帧
+        query = extract_action_segment(query)
+        template = extract_action_segment(template)
+
+        # 记录裁剪后的帧数（用于对比视频的帧映射）
+        cropped_q = query.num_frames
+        cropped_t = template.num_frames
+
+        logger.debug(
+            f"片段提取后: query {orig_q}→{cropped_q}帧, "
+            f"template {orig_t}→{cropped_t}帧"
+        )
+        # ==============================================================
+
+        # 预处理：按原始比例分配目标帧数，确保子序列 DTW 有发挥空间
         if self._preprocess:
-            query = preprocess_pipeline(query, target_frames=self._target_frames)
-            template = preprocess_pipeline(template, target_frames=self._target_frames)
+            q_target = self._target_frames  # 默认 60
+            t_target = self._target_frames
+            if cropped_t > 0:
+                ratio = cropped_q / cropped_t
+                if ratio > 1.2:
+                    q_target = int(self._target_frames * ratio)
+                elif ratio < 0.8:
+                    t_target = int(self._target_frames / ratio)
+            query = preprocess_pipeline(query, target_frames=q_target)
+            template = preprocess_pipeline(template, target_frames=t_target)
 
         # 转换为特征矩阵（带身体比例归一化）
         q_matrix = sequence_to_feature_matrix(
@@ -111,22 +145,25 @@ class ActionComparator:
             template, normalize_body_scale=True
         )
 
-        # DTW 计算（子序列模式：原始 query 长于 template 时自动找最佳匹配段）
+        # DTW 计算（子序列模式：自动双向适配长短不一的序列）
         distance, path, cost_matrix = compute_dtw(
             q_matrix, t_matrix,
             algorithm=self._algorithm,
             metric=self._metric,
             window_size=self._window_size,
             use_subsequence=True,
-            original_ratio=orig_ratio,
         )
 
-        # 相似度归一化
+        # ======== 改进相似度归一化（高斯核映射） ========
         path_length = len(path)
         normalized_dist = distance / path_length if path_length > 0 else distance
-        similarity = 1.0 / (1.0 + normalized_dist)
 
-        return ComparisonResult(
+        sigma = self._similarity_sigma
+        similarity = np.exp(-(normalized_dist ** 2) / (2 * sigma ** 2))
+        similarity = float(np.clip(similarity, 0.0, 1.0))
+        # ==================================================
+
+        result = ComparisonResult(
             distance=distance,
             similarity=similarity,
             path=path,
@@ -135,6 +172,14 @@ class ActionComparator:
             metric=self._metric,
             template_name=template_name,
         )
+
+        # 存储裁剪信息，供对比视频生成时使用
+        result.query_crop_range = query.metadata.get('cropped_from', (0, orig_q))
+        result.template_crop_range = template.metadata.get('cropped_from', (0, orig_t))
+        result.cropped_query_frames = cropped_q
+        result.cropped_template_frames = cropped_t
+
+        return result
 
     def compare_with_templates(
         self,

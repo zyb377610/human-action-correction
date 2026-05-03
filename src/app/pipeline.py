@@ -553,7 +553,9 @@ class AppPipeline:
 
         # 更新 CorrectionPipeline 的对比器
         offline_algo = self._resolve_offline_algorithm()
+        offline_metric = self._resolve_offline_metric()
         self._correction_pipeline._comparator._algorithm = offline_algo
+        self._correction_pipeline._comparator._metric = offline_metric
 
         # 更新实时引擎（如果已创建）
         if self._realtime_engine is not None:
@@ -561,14 +563,21 @@ class AppPipeline:
 
         logger.info(
             f"DTW 算法切换: {algorithm} "
-            f"(离线={offline_algo}, 实时={self._resolve_realtime_algorithm()})"
+            f"(离线={offline_algo}+{offline_metric}, "
+            f"实时={self._resolve_realtime_algorithm()})"
         )
 
     def _resolve_offline_algorithm(self) -> str:
         """解析离线分析使用的实际算法"""
         if self._algorithm == "auto":
-            return "ddtw"
+            return "dtw"  # 角度特征 + 经典DTW 区分度最好
         return self._algorithm
+
+    def _resolve_offline_metric(self) -> str:
+        """解析离线分析使用的距离度量"""
+        if self._algorithm == "auto":
+            return "euclidean"  # 角度特征下欧氏距离最稳定
+        return "euclidean"
 
     def _resolve_realtime_algorithm(self) -> str:
         """解析实时分析使用的实际算法"""

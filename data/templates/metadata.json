@@ -39,6 +39,16 @@
       "display_name": "throw",
       "description": "",
       "template_count": 1
+    },
+    "throw1": {
+      "display_name": "throw1",
+      "description": "",
+      "template_count": 1
+    },
+    "throw2": {
+      "display_name": "throw2",
+      "description": "",
+      "template_count": 1
     }
   }
 }

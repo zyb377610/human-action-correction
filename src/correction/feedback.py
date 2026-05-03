@@ -96,17 +96,35 @@ class FeedbackGenerator:
         Returns:
             CorrectionReport
         """
-        # 确定质量评分（sigmoid 映射：低相似度低分，中高相似度加速上升）
+        # 确定质量评分（角度特征 + 高斯相似度 sigma=0.7）
         if quality_score is not None:
             score = quality_score
         elif prediction is not None:
             score = prediction.quality_score
         else:
-            # sigmoid-like 映射 similarity ∈ [0,1] → score ∈ [0,100]
-            # sim=0.2→14, 0.4→35, 0.5→50, 0.6→65, 0.7→77, 0.8→86, 0.9→92
-            k = 6.0  # 陡峭度
-            x0 = 0.5  # 中点
-            score = 100.0 / (1.0 + np.exp(-k * (similarity - x0)))
+            # 分段线性映射 similarity ∈ [0,1] → score ∈ [0,100]
+            # 角度特征 + sigma=0.7 下的典型分布：
+            #   自对比 sim≈1.0 → 100分
+            #   同类动作 sim≈0.70~0.85 → 70~90分
+            #   异类动作 sim≈0.20~0.45 → 低分
+            if similarity >= 0.999:
+                score = 100.0
+            elif similarity >= 0.85:
+                # 0.85~1.0 → 90~100 （优秀）
+                score = 90.0 + (similarity - 0.85) / 0.15 * 10.0
+            elif similarity >= 0.70:
+                # 0.70~0.85 → 70~90 （良好）
+                score = 70.0 + (similarity - 0.70) / 0.15 * 20.0
+            elif similarity >= 0.50:
+                # 0.50~0.70 → 45~70 （一般）
+                score = 45.0 + (similarity - 0.50) / 0.20 * 25.0
+            elif similarity >= 0.30:
+                # 0.30~0.50 → 20~45 （较差）
+                score = 20.0 + (similarity - 0.30) / 0.20 * 25.0
+            else:
+                # 0~0.30 → 0~20 （差距很大）
+                score = similarity / 0.30 * 20.0
+                score = similarity / 0.15 * 10.0
 
         # 确定置信度
         confidence = prediction.confidence if prediction else 0.0

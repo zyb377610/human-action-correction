@@ -295,22 +295,34 @@ def compute_dtw(
     dist_func = get_distance_func(metric)
     algorithm = algorithm.lower().strip()
 
-    # 基于原始帧数比而非当前矩阵维度判断是否用子序列
-    should_subsequence = use_subsequence and original_ratio > 1.3
+    # Step 1: 计算特征（DDTW 先求导，再送入 DTW）
+    if algorithm == "ddtw":
+        q_feat = _compute_derivative(query)
+        t_feat = _compute_derivative(template)
+    else:
+        q_feat = query
+        t_feat = template
 
-    if should_subsequence:
-        distance, path, cost, _, _ = subsequence_dtw(
-            query, template, dist_func, window_size
-        )
+    # Step 2: 子序列 DTW — 始终启用，双向支持
+    # 等长时退化为经典 DTW（匹配段覆盖全序列，行为一致）
+    if use_subsequence:
+        if len(q_feat) >= len(t_feat):
+            distance, path, cost, _, _ = subsequence_dtw(
+                q_feat, t_feat, dist_func, window_size
+            )
+        else:
+            # template 更长：交换角色，在 template 中找 query 的匹配段
+            distance, path, cost, _, _ = subsequence_dtw(
+                t_feat, q_feat, dist_func, window_size
+            )
+            path = [(j, i) for i, j in path]
         return distance, path, cost
 
-    if algorithm == "dtw":
-        return classic_dtw(query, template, dist_func, window_size)
+    if algorithm in ("dtw", "ddtw"):
+        return classic_dtw(q_feat, t_feat, dist_func, window_size)
     elif algorithm == "fastdtw":
         radius = window_size if window_size else 1
-        return fast_dtw(query, template, dist_func, radius)
-    elif algorithm == "ddtw":
-        return derivative_dtw(query, template, dist_func, window_size)
+        return fast_dtw(q_feat, t_feat, dist_func, radius)
     else:
         raise ValueError(
             f"不支持的 DTW 算法: '{algorithm}'，可选: dtw / fastdtw / ddtw"
