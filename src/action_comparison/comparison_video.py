@@ -104,7 +104,6 @@ def generate_comparison_video(
     quality_score: float = 0.0,
     corrections: Optional[List] = None,
     progress_callback=None,
-    video_start_frame: int = 0,
 ) -> Optional[str]:
     """
     生成左右并排的骨骼对比视频
@@ -201,12 +200,8 @@ def generate_comparison_video(
             logger.error(f"无法创建输出视频: {output_path}")
             return None
 
-    # ---- 8. 逐帧生成（从 video_start_frame 开始） ----
-    # 跳到起始帧
-    if video_start_frame > 0:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, video_start_frame)
-
-    frame_count = min(total_video_frames - video_start_frame, user_sequence.num_frames)
+    # ---- 8. 逐帧生成 ----
+    frame_count = min(total_video_frames, user_sequence.num_frames)
     step = max(1, frame_count // 100)
 
     for user_idx in range(frame_count):

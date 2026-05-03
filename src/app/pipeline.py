@@ -26,7 +26,6 @@ from src.correction.realtime_feedback import (
     FeedbackSnapshot,
 )
 from src.action_comparison.comparison_video import generate_comparison_video
-from src.data.preprocessing import extract_action_segment
 
 from .data_types import AnalysisResult, ProcessedFrame, TemplateRecordResult
 
@@ -409,13 +408,6 @@ class AppPipeline:
                 progress_callback(step_offset + step, total_steps, msg)
 
         try:
-            # Step 1.5: 提取动作片段（剔除准备/收尾无关帧，>120帧时触发）
-            crop_start = 0
-            original_sequence = sequence  # 保留原始引用用于对比视频
-            if sequence.num_frames > 120:
-                sequence = extract_action_segment(sequence)
-                crop_start = sequence.metadata.get('cropped_from', (0, 0))[0]
-
             # Step 2: 分类
             _progress(2, "正在分析动作类型…")
 
@@ -464,7 +456,6 @@ class AppPipeline:
                         quality_score=report.quality_score,
                         corrections=list(report.corrections),
                         progress_callback=None,
-                        video_start_frame=crop_start,
                     )
                 except Exception as e:
                     logger.warning(f"生成对比视频失败: {e}")

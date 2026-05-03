@@ -106,12 +106,13 @@ class ActionComparator:
             template, normalize_body_scale=True
         )
 
-        # DTW 计算
+        # DTW 计算（子序列模式：query 长于 template 时自动找最佳匹配段）
         distance, path, cost_matrix = compute_dtw(
             q_matrix, t_matrix,
             algorithm=self._algorithm,
             metric=self._metric,
             window_size=self._window_size,
+            use_subsequence=True,
         )
 
         # 相似度归一化
