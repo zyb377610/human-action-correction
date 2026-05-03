@@ -232,6 +232,10 @@ def generate_comparison_video(
         canvas[:video_h, video_w:output_w] = COLOR_PANEL_BG
 
         tpl_idx = _orig_to_tpl(user_idx)
+        # 无匹配时显示模板首帧作为静态参考姿势
+        if tpl_idx is None and 0 in tpl_frames_data:
+            tpl_idx = 0
+
         if tpl_idx is not None and tpl_idx in tpl_frames_data:
             _draw_skeleton_on_region(
                 canvas, None, video_w, 0, video_w, video_h,
@@ -240,7 +244,8 @@ def generate_comparison_video(
             )
 
         # 标签
-        cv2.putText(canvas, "Template (DTW matched)", (video_w + 8, 22),
+        state_text = "Template (static)" if (_orig_to_tpl(user_idx) is None and 0 in tpl_frames_data) else "Template (DTW matched)"
+        cv2.putText(canvas, state_text, (video_w + 8, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_GRAY, 2)
 
         # 显示模板帧号

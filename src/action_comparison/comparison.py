@@ -93,6 +93,11 @@ class ActionComparator:
         Returns:
             ComparisonResult
         """
+        # 记录原始帧数比（预处理前），用于子序列 DTW 决策
+        orig_q_frames = query.num_frames
+        orig_t_frames = template.num_frames
+        orig_ratio = orig_q_frames / max(orig_t_frames, 1)
+
         # 预处理
         if self._preprocess:
             query = preprocess_pipeline(query, target_frames=self._target_frames)
@@ -106,13 +111,14 @@ class ActionComparator:
             template, normalize_body_scale=True
         )
 
-        # DTW 计算（子序列模式：query 长于 template 时自动找最佳匹配段）
+        # DTW 计算（子序列模式：原始 query 长于 template 时自动找最佳匹配段）
         distance, path, cost_matrix = compute_dtw(
             q_matrix, t_matrix,
             algorithm=self._algorithm,
             metric=self._metric,
             window_size=self._window_size,
             use_subsequence=True,
+            original_ratio=orig_ratio,
         )
 
         # 相似度归一化

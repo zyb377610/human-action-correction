@@ -275,6 +275,7 @@ def compute_dtw(
     metric: str = "euclidean",
     window_size: Optional[int] = None,
     use_subsequence: bool = False,
+    original_ratio: float = 1.0,
 ) -> Tuple[float, List[Tuple[int, int]], Optional[np.ndarray]]:
     """
     统一 DTW 调度函数
@@ -285,7 +286,8 @@ def compute_dtw(
         algorithm: "dtw" / "fastdtw" / "ddtw"
         metric: "euclidean" / "cosine" / "manhattan"
         window_size: Sakoe-Chiba 带宽约束
-        use_subsequence: 是否使用子序列 DTW（query 长于 template 时启用）
+        use_subsequence: 是否使用子序列 DTW
+        original_ratio: 原始序列帧数比（预处理前），>1.3 时强制子序列
 
     Returns:
         (distance, path, cost_matrix)
@@ -293,8 +295,10 @@ def compute_dtw(
     dist_func = get_distance_func(metric)
     algorithm = algorithm.lower().strip()
 
-    if use_subsequence and len(query) > len(template) * 1.1:
-        # 子序列模式：模板在 query 中找最佳匹配段
+    # 基于原始帧数比而非当前矩阵维度判断是否用子序列
+    should_subsequence = use_subsequence and original_ratio > 1.3
+
+    if should_subsequence:
         distance, path, cost, _, _ = subsequence_dtw(
             query, template, dist_func, window_size
         )
