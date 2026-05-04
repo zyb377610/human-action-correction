@@ -145,6 +145,9 @@ class FeedbackGenerator:
         # 动作显示名称
         display_name = self._display_names.get(action_name, action_name)
 
+        # 关节英文名 → 中文名映射（从规则引擎取）
+        from .rules import JOINT_DISPLAY_NAMES as _JOINT_DISPLAY
+
         return CorrectionReport(
             action_name=action_name,
             action_display_name=display_name,
@@ -156,6 +159,9 @@ class FeedbackGenerator:
             joint_deviations=deviation_report.joint_deviations,
             angle_deviations=angle_deviations or {},
             confidence=confidence,
+            joint_display_map=dict(_JOINT_DISPLAY),
+            frame_details=list(getattr(deviation_report, "frame_details", []) or []),
+            excluded_joints=list(getattr(deviation_report, "excluded_joint_names", []) or []),
         )
 
     @staticmethod

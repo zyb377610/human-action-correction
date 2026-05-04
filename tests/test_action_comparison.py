@@ -119,14 +119,24 @@ class TestDistanceMetrics:
             get_distance_func("invalid")
 
     def test_sequence_to_feature_matrix(self, seq_a):
-        """默认使用 17 个核心关节点，输出 (T, 51)"""
+        """默认使用角度特征（9 个角度）"""
         matrix = sequence_to_feature_matrix(seq_a)
-        assert matrix.shape == (20, 51)  # 17 核心关节 × 3
+        # 当前实现使用关节角度作为特征，9 个角度
+        assert matrix.ndim == 2
+        assert matrix.shape[0] == 20
+        assert matrix.shape[1] == 9
 
-    def test_sequence_to_feature_matrix_all_joints(self, seq_a):
-        """使用全部 33 个关节点时，输出 (T, 99)"""
+    def test_sequence_to_landmark_matrix(self, seq_a):
+        """关节坐标矩阵：默认 17 核心关节 × 3 = 51"""
+        from src.action_comparison.distance_metrics import sequence_to_landmark_matrix
+        matrix = sequence_to_landmark_matrix(seq_a)
+        assert matrix.shape == (20, 51)
+
+    def test_sequence_to_landmark_matrix_all_joints(self, seq_a):
+        """全部 33 个关节 → 99 维"""
+        from src.action_comparison.distance_metrics import sequence_to_landmark_matrix
         all_joints = list(range(33))
-        matrix = sequence_to_feature_matrix(seq_a, joint_indices=all_joints)
+        matrix = sequence_to_landmark_matrix(seq_a, joint_indices=all_joints)
         assert matrix.shape == (20, 99)
 
 

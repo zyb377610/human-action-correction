@@ -6,6 +6,7 @@ from src.action_comparison.distance_metrics import (
     manhattan_distance,
     get_distance_func,
     sequence_to_feature_matrix,
+    sequence_to_landmark_matrix,
     CORE_JOINT_INDICES,
     CORE_JOINT_NAMES,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "manhattan_distance",
     "get_distance_func",
     "sequence_to_feature_matrix",
+    "sequence_to_landmark_matrix",
     "CORE_JOINT_INDICES",
     "CORE_JOINT_NAMES",
     # DTW 算法

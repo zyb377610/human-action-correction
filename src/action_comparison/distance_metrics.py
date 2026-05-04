@@ -137,6 +137,64 @@ def sequence_to_feature_matrix(
     return matrix
 
 
+def sequence_to_landmark_matrix(
+    sequence,
+    joint_indices: Optional[Sequence[int]] = None,
+    normalize: bool = True,
+) -> np.ndarray:
+    """
+    将 PoseSequence 转换为 **关节坐标** 特征矩阵（用于空间偏差分析）
+
+    与 sequence_to_feature_matrix（角度）不同，本函数返回每帧指定关节的
+    xyz 坐标，经过髋中点平移 + 躯干长度缩放归一化，使得不同相机位置、
+    不同身高体型的用户/模板可以直接在同一坐标系下做欧氏距离对比。
+
+    Args:
+        sequence: PoseSequence 对象
+        joint_indices: 关节索引列表，None 使用 CORE_JOINT_INDICES
+        normalize: 是否进行身体尺度归一化
+
+    Returns:
+        (T, J*3) ndarray，每一行是 J 个关节的 xyz 拼接，已归一化。
+    """
+    if joint_indices is None:
+        joint_indices = CORE_JOINT_INDICES
+    joint_indices = list(joint_indices)
+    J = len(joint_indices)
+
+    arr = sequence.to_numpy()  # (T, 33, 4)
+    T = arr.shape[0]
+    matrix = np.zeros((T, J * 3), dtype=np.float64)
+
+    for t in range(T):
+        lm = arr[t]  # (33, 4)
+        if normalize and lm.shape[0] > 24:
+            # 髋中点作为坐标原点
+            cx = (lm[23, 0] + lm[24, 0]) / 2.0
+            cy = (lm[23, 1] + lm[24, 1]) / 2.0
+            cz = (lm[23, 2] + lm[24, 2]) / 2.0
+            # 肩中点
+            sx = (lm[11, 0] + lm[12, 0]) / 2.0
+            sy = (lm[11, 1] + lm[12, 1]) / 2.0
+            sz = (lm[11, 2] + lm[12, 2]) / 2.0
+            torso = np.sqrt(
+                (sx - cx) ** 2 + (sy - cy) ** 2 + (sz - cz) ** 2
+            )
+            if torso < 1e-3:
+                torso = 1.0
+        else:
+            cx = cy = cz = 0.0
+            torso = 1.0
+
+        for k, j in enumerate(joint_indices):
+            if j < lm.shape[0]:
+                matrix[t, k * 3 + 0] = (lm[j, 0] - cx) / torso
+                matrix[t, k * 3 + 1] = (lm[j, 1] - cy) / torso
+                matrix[t, k * 3 + 2] = (lm[j, 2] - cz) / torso
+
+    return matrix
+
+
 def _compute_body_scale(sequence) -> float:
     """计算身体尺度因子（平均躯干长度），用于归一化体型差异"""
     # 肩中点(11,12) → 髋中点(23,24)
@@ -157,3 +215,130 @@ def _compute_body_scale(sequence) -> float:
             total_torso += torso
             count += 1
     return total_torso / count if count > 0 else 1.0
+
+
+def compute_valid_joints(
+    sequence,
+    visibility_threshold: float = 0.3,
+    presence_ratio_threshold: float = 0.6,
+) -> list:
+    """
+    从模板序列中提取"有效关节集"。
+
+    一个关节被认为"有效"，当且仅当其在至少 `presence_ratio_threshold`
+    比例的帧上 visibility >= `visibility_threshold`。
+
+    这为"模板权威性原则"提供支撑：模板里看不到的关节（例如只录了上半身），
+    下游对比与矫正也应自动忽略。
+
+    Args:
+        sequence: PoseSequence
+        visibility_threshold: 单帧视为"可见"的置信度阈值
+        presence_ratio_threshold: 关节视为"整体可见"的帧占比阈值
+
+    Returns:
+        有效关节索引列表（取自 CORE_JOINT_INDICES 的子集），保证顺序。
+    """
+    arr = sequence.to_numpy()  # (T, 33, 4)
+    T = arr.shape[0]
+    if T == 0:
+        return list(CORE_JOINT_INDICES)
+
+    valid = []
+    for j in CORE_JOINT_INDICES:
+        if j >= arr.shape[1]:
+            continue
+        vis = arr[:, j, 3]
+        present = float(np.mean(vis >= visibility_threshold))
+        if present >= presence_ratio_threshold:
+            valid.append(j)
+
+    # 极端情况：若阈值太严导致全部被剔，退回全核心集
+    if len(valid) < 3:
+        return list(CORE_JOINT_INDICES)
+    return valid
+
+
+def _rotation_from_shoulder_axis(lm: np.ndarray) -> np.ndarray:
+    """
+    从单帧 landmarks 计算一个 2D 旋转矩阵，使左→右肩向量对齐到 +x 方向。
+
+    只做 xy 平面的旋转（大多数摄像场景下肩轴倾斜主要体现在 xy）。
+
+    Args:
+        lm: (33, 4) 原始关键点
+
+    Returns:
+        2x2 旋转矩阵
+    """
+    if lm.shape[0] <= 12:
+        return np.eye(2)
+    lsh = lm[11, :2]
+    rsh = lm[12, :2]
+    axis = rsh - lsh
+    n = np.linalg.norm(axis)
+    if n < 1e-6:
+        return np.eye(2)
+    axis = axis / n
+    # axis = (cos θ, sin θ) 希望旋转到 (1, 0) → 旋转矩阵为 [[cos, sin], [-sin, cos]]
+    c, s = axis[0], axis[1]
+    return np.array([[c, s], [-s, c]], dtype=np.float64)
+
+
+def sequence_to_landmark_matrix_masked(
+    sequence,
+    joint_indices: Sequence[int],
+    align_shoulder: bool = True,
+) -> np.ndarray:
+    """
+    增强版坐标矩阵提取：
+    - 仅保留指定关节（joint_indices）
+    - 髋中点平移归一化 + 躯干长度缩放归一化
+    - 可选：基于肩轴的 2D 旋转对齐，进一步抵消不同摄像角度下上身倾斜
+
+    Args:
+        sequence: PoseSequence
+        joint_indices: 要保留的关节索引列表
+        align_shoulder: 是否按肩轴对齐（推荐 True，消除左右镜像/侧身差异）
+
+    Returns:
+        (T, J*3) ndarray
+    """
+    joint_indices = list(joint_indices)
+    J = len(joint_indices)
+    arr = sequence.to_numpy()  # (T, 33, 4)
+    T = arr.shape[0]
+    matrix = np.zeros((T, J * 3), dtype=np.float64)
+
+    for t in range(T):
+        lm = arr[t]
+        if lm.shape[0] > 24:
+            cx = (lm[23, 0] + lm[24, 0]) / 2.0
+            cy = (lm[23, 1] + lm[24, 1]) / 2.0
+            cz = (lm[23, 2] + lm[24, 2]) / 2.0
+            sx = (lm[11, 0] + lm[12, 0]) / 2.0
+            sy = (lm[11, 1] + lm[12, 1]) / 2.0
+            sz = (lm[11, 2] + lm[12, 2]) / 2.0
+            torso = np.sqrt(
+                (sx - cx) ** 2 + (sy - cy) ** 2 + (sz - cz) ** 2
+            )
+            if torso < 1e-3:
+                torso = 1.0
+        else:
+            cx = cy = cz = 0.0
+            torso = 1.0
+
+        R = _rotation_from_shoulder_axis(lm) if align_shoulder else np.eye(2)
+
+        for k, j in enumerate(joint_indices):
+            if j < lm.shape[0]:
+                dx = (lm[j, 0] - cx) / torso
+                dy = (lm[j, 1] - cy) / torso
+                dz = (lm[j, 2] - cz) / torso
+                # xy 做旋转对齐
+                xy = R @ np.array([dx, dy])
+                matrix[t, k * 3 + 0] = xy[0]
+                matrix[t, k * 3 + 1] = xy[1]
+                matrix[t, k * 3 + 2] = dz
+
+    return matrix

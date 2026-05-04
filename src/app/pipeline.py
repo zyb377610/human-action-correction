@@ -14,7 +14,11 @@ from typing import Callable, Optional
 import cv2
 import numpy as np
 
-from src.pose_estimation.estimator import PoseEstimator
+from src.pose_estimation.estimator import (
+    PoseEstimator,
+    PoseSmoother,
+    StreamingPoseEstimator,
+)
 from src.pose_estimation.data_types import PoseFrame, PoseSequence, PoseLandmark
 from src.pose_estimation.visualizer import draw_skeleton
 from src.pose_estimation.video_source import FileSource
@@ -88,8 +92,13 @@ class AppPipeline:
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 姿态估计器
+        # 姿态估计器（离线：IMAGE 模式）
         self._estimator = PoseEstimator()
+
+        # 实时链路专用流式估计器（LIVE_STREAM 模式，支持时序追踪）
+        # 摄像头和实时反馈分别用一个独立实例，避免时间戳冲突
+        self._cam_streamer: Optional[StreamingPoseEstimator] = None
+        self._rt_streamer: Optional[StreamingPoseEstimator] = None
 
         # 模板库
         self._library = TemplateLibrary(templates_dir)
@@ -110,7 +119,26 @@ class AppPipeline:
         # 实时反馈引擎（在 init_realtime_session 时创建）
         self._realtime_engine: Optional[RealtimeFeedbackEngine] = None
 
+        # 实时链路轻量 EMA 平滑器（MediaPipe 时序追踪之上的微平滑）
+        # alpha 调高（0.80）、hold 调小（3 帧）→ 跟动作更紧
+        self._cam_smoother = PoseSmoother(alpha=0.80, min_alpha_floor=0.55,
+                                           max_hold_frames=3)
+        self._rt_smoother = PoseSmoother(alpha=0.80, min_alpha_floor=0.55,
+                                          max_hold_frames=3)
+
         logger.info("AppPipeline 初始化完成")
+
+    def _ensure_cam_streamer(self) -> StreamingPoseEstimator:
+        """摄像头流式估计器按需创建"""
+        if self._cam_streamer is None:
+            self._cam_streamer = StreamingPoseEstimator()
+        return self._cam_streamer
+
+    def _ensure_rt_streamer(self) -> StreamingPoseEstimator:
+        """实时反馈流式估计器按需创建"""
+        if self._rt_streamer is None:
+            self._rt_streamer = StreamingPoseEstimator()
+        return self._rt_streamer
 
     # ================================================================
     # 核心方法 1: 视频文件分析
@@ -194,6 +222,9 @@ class AppPipeline:
         """
         处理摄像头单帧，返回带骨骼叠加的图像
 
+        使用 MediaPipe LIVE_STREAM 模式 + 轻量 EMA 微平滑，
+        既有官方时序追踪的稳定性，又保留 EMA 的抗抖动能力。
+
         Args:
             frame: BGR 图像 (H, W, 3)
 
@@ -203,22 +234,52 @@ class AppPipeline:
         if frame is None or frame.size == 0:
             return ProcessedFrame(annotated_image=frame)
 
-        pose_frame = self._estimator.estimate_frame(frame)
+        streamer = self._ensure_cam_streamer()
+        raw = streamer.process(frame)
+        smoothed = self._cam_smoother.update(raw)
 
-        if pose_frame is None:
+        if smoothed is None:
+            # 既无当前检测，也无历史可复用
             return ProcessedFrame(annotated_image=frame.copy())
 
-        # 绘制骨骼
+        # 用平滑后的 landmarks 构造 PoseFrame 用于绘制
+        draw_frame = self._landmarks_to_poseframe(smoothed)
         annotated = frame.copy()
-        draw_skeleton(annotated, pose_frame)
-
-        # 提取 landmarks 为 numpy 数组
-        landmarks = pose_frame.to_numpy()  # (33, 4)
+        draw_skeleton(annotated, draw_frame)
 
         return ProcessedFrame(
             annotated_image=annotated,
-            landmarks=landmarks,
+            landmarks=smoothed,
         )
+
+    @staticmethod
+    def _landmarks_to_poseframe(landmarks: np.ndarray,
+                                 frame_index: int = 0,
+                                 timestamp: float = 0.0) -> PoseFrame:
+        """将 (33, 4) 关键点数组包装为 PoseFrame（用于可视化）"""
+        lm_list = [
+            PoseLandmark(
+                x=float(landmarks[j, 0]),
+                y=float(landmarks[j, 1]),
+                z=float(landmarks[j, 2]),
+                visibility=float(landmarks[j, 3]) if landmarks.shape[1] > 3 else 1.0,
+            )
+            for j in range(landmarks.shape[0])
+        ]
+        return PoseFrame(
+            timestamp=timestamp,
+            frame_index=frame_index,
+            landmarks=lm_list,
+        )
+
+    def reset_camera_smoothers(self):
+        """在会话切换时重置摄像头/实时链路的平滑器与流式估计器"""
+        self._cam_smoother.reset()
+        self._rt_smoother.reset()
+        if self._cam_streamer is not None:
+            self._cam_streamer.reset()
+        if self._rt_streamer is not None:
+            self._rt_streamer.reset()
 
     # ================================================================
     # 核心方法 4: 模板录入
@@ -260,6 +321,12 @@ class AppPipeline:
                 self._library.add_action(action_name, display_name)
 
             self._library.add_template(action_name, sequence, template_name)
+
+            # 模板入库后立即生成骨骼演示视频，避免后续展示时延迟
+            try:
+                self._build_template_demo(action_name, template_name, sequence)
+            except Exception as _e:
+                logger.warning(f"预生成模板演示视频失败（不影响录入）: {_e}")
 
             logger.info(
                 f"模板录入成功: {action_name}/{template_name} "
@@ -378,6 +445,336 @@ class AppPipeline:
                 "templates": templates,
             })
         return info_list
+
+    def delete_template(self, action: str, template_name: str,
+                        auto_remove_empty_action: bool = True) -> dict:
+        """
+        删除指定动作下的模板。当该动作下最后一个模板被删除时，
+        可选地同时移除该动作类别，避免其在下拉列表中继续占位。
+
+        Returns:
+            {"success": bool, "message": str, "action_removed": bool}
+        """
+        try:
+            templates_before = self._library.list_templates(action)
+            if template_name not in templates_before:
+                return {
+                    "success": False,
+                    "message": f"模板不存在: {action}/{template_name}",
+                    "action_removed": False,
+                }
+            self._library.delete_template(action, template_name)
+            templates_after = self._library.list_templates(action)
+            action_removed = False
+            if auto_remove_empty_action and len(templates_after) == 0:
+                action_removed = self._library.delete_action(action)
+            msg = f"✅ 已删除模板: {action}/{template_name}"
+            if action_removed:
+                msg += f"（该动作已无模板，动作类别 '{action}' 也已一并移除）"
+            return {
+                "success": True,
+                "message": msg,
+                "action_removed": action_removed,
+            }
+        except Exception as e:
+            logger.error(f"删除模板失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"❌ 删除失败: {e}",
+                "action_removed": False,
+            }
+
+    def delete_action(self, action: str) -> dict:
+        """删除整个动作类别及其所有模板"""
+        try:
+            ok = self._library.delete_action(action)
+            if ok:
+                return {
+                    "success": True,
+                    "message": f"✅ 已删除动作类别: {action}",
+                }
+            return {
+                "success": False,
+                "message": f"⚠️ 动作类别不存在: {action}",
+            }
+        except Exception as e:
+            logger.error(f"删除动作失败: {e}", exc_info=True)
+            return {"success": False, "message": f"❌ 删除失败: {e}"}
+
+    # ================================================================
+    # 模板骨骼演示视频（问题4）
+    #
+    # 存储位置: data/templates/<action>/<template>.demo.mp4
+    #   → 与模板 JSON 并列，跟随模板一起被 delete_template 清理
+    # ================================================================
+
+    def _template_demo_path(self, action: str, template_name: str) -> "Path":
+        # 与模板 JSON 放在同一目录下，文件名固定 "<template>.demo.mp4"
+        return self._library.root / action / f"{template_name}.demo.mp4"
+
+    def _build_template_demo(
+        self,
+        action: str,
+        template_name: str,
+        sequence=None,
+    ) -> Optional[str]:
+        """内部方法：若不存在则真正渲染并保存演示视频"""
+        from src.correction.template_video import render_template_demo_video
+
+        out_path = self._template_demo_path(action, template_name)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if sequence is None:
+            try:
+                sequence = self._library.load_template(action, template_name)
+            except Exception as e:
+                logger.warning(f"加载模板失败: {e}")
+                return None
+
+        if sequence is None or sequence.num_frames == 0:
+            return None
+
+        return render_template_demo_video(
+            sequence=sequence,
+            output_path=str(out_path),
+            title=f"{action} / {template_name}",
+        )
+
+    def get_template_demo_path(
+        self,
+        action: str,
+        template_name: str,
+        build_if_missing: bool = True,
+    ) -> Optional[str]:
+        """
+        获取指定模板的演示视频路径。
+
+        - 若视频已存在 → 直接返回路径（**点击即播放，无生成延时**）
+        - 若不存在且 build_if_missing=True → 按需渲染一次后返回
+        - 若不存在且 build_if_missing=False → 返回 None
+
+        Args:
+            action: 动作类别
+            template_name: 模板名
+            build_if_missing: 文件不存在时是否按需生成
+
+        Returns:
+            视频路径字符串；失败或不存在时 None
+        """
+        out_path = self._template_demo_path(action, template_name)
+        if out_path.exists():
+            return str(out_path)
+        if not build_if_missing:
+            return None
+        return self._build_template_demo(action, template_name)
+
+    # ================================================================
+    # 帧对比查看器（问题5）
+    #
+    # 设计原则：
+    # - 采用与 comparison_video 完全一致的 DTW 子序列匹配帧映射，
+    #   保证滑条拖到任一用户帧时，右侧模板帧就是它"同步演示"的那一帧。
+    # - 渲染复用 _draw_skeleton_on_region，与模板对比视频的视觉风格一致。
+    # - 不做归一化 / 旋转，保证骨骼形态正常（不会出现扭曲）。
+    # ================================================================
+
+    def prepare_frame_viewer(self, report) -> Optional[dict]:
+        """
+        基于 CorrectionReport 构建帧对比所需的"索引表"。
+
+        一次性地：
+          1. 在原始用户序列 + 原始模板序列上跑子序列 DTW，得到 {user_frame_idx: tpl_frame_idx}
+          2. 记录用户 PoseSequence 帧的 seq_index→frame_index 映射
+          3. 返回一个 dict，供后续多次"按用户帧渲染"复用
+
+        Args:
+            report: CorrectionReport（需带 _comparison_result / _best_template）
+
+        Returns:
+            dict {
+              "user_seq": PoseSequence,
+              "template_seq": PoseSequence,
+              "dtw_map": Dict[int_user_seq_idx, int_tpl_seq_idx],
+              "match_start": int,   # user_seq 本地索引
+              "match_end": int,
+              "joint_deviations": Dict[str, float],  # 中/英文关节 → 偏差
+              "total_user_frames": int,
+            } 或 None
+        """
+        comp = getattr(report, "_comparison_result", None)
+        tpl_seq = getattr(report, "_best_template", None)
+        if comp is None or tpl_seq is None:
+            return None
+
+        # 我们需要"原始"用户序列用于渲染（未预处理，骨骼形态正常）
+        user_seq = getattr(report, "_user_sequence", None)
+        if user_seq is None:
+            user_seq = getattr(comp, "user_sequence", None)
+        if user_seq is None:
+            # 最后兜底：用预处理后的
+            user_seq = getattr(comp, "processed_query", None)
+        if user_seq is None or user_seq.num_frames == 0:
+            return None
+        if tpl_seq.num_frames == 0:
+            return None
+
+        from src.action_comparison.comparison_video import _build_direct_dtw_map
+        from src.correction.template_video import compute_sequence_fit_box
+
+        dtw_map, match_start, match_end = _build_direct_dtw_map(
+            user_seq, tpl_seq
+        )
+
+        # 预计算居中缩放参数（整段序列共用，渲染时保持稳定不抖）
+        user_fit_box = compute_sequence_fit_box(user_seq)
+        template_fit_box = compute_sequence_fit_box(tpl_seq)
+
+        # 让两侧骨骼显示大小一致：统一用较大 scale_ref（更小的放大系数）
+        # 这样动作较小的一方不会被放太大、动作较大的一方也能完整装进画布。
+        # fit_box = (cx, cy, half_w, half_h, scale_ref)
+        unified_scale = max(user_fit_box[4], template_fit_box[4])
+        user_fit_box = (*user_fit_box[:4], unified_scale)
+        template_fit_box = (*template_fit_box[:4], unified_scale)
+
+        return {
+            "user_seq": user_seq,
+            "template_seq": tpl_seq,
+            "dtw_map": dtw_map,
+            "match_start": match_start,
+            "match_end": match_end,
+            "user_fit_box": user_fit_box,
+            "template_fit_box": template_fit_box,
+            "joint_deviations": dict(report.joint_deviations or {}),
+            "total_user_frames": user_seq.num_frames,
+        }
+
+    def render_viewer_frame(
+        self,
+        viewer_state: dict,
+        user_frame_idx: int,
+        width: int = 480,
+        height: int = 640,
+    ) -> Optional[dict]:
+        """
+        按"用户帧序号"渲染一帧并排骨骼对比图。
+
+        Args:
+            viewer_state: prepare_frame_viewer 返回的字典
+            user_frame_idx: 用户序列中的帧号（0-based；这是 PoseSequence 内的
+                           本地序号，因为播放时我们是逐帧扫 PoseSequence 而
+                           非原始视频文件）
+            width/height: 单侧画幅
+
+        Returns:
+            dict {
+              "image": RGB ndarray,
+              "step_info": str,
+              "joint_table": [(中文名, 英文名, 偏差), ...]
+              "advice_lines": [str, ...]
+            }
+        """
+        if not viewer_state:
+            return None
+
+        from src.correction.template_video import render_pair_frame
+        from src.action_comparison.distance_metrics import (
+            CORE_JOINT_NAMES, CORE_JOINT_INDICES,
+        )
+        from src.pose_estimation.data_types import LANDMARK_NAMES
+
+        user_seq = viewer_state["user_seq"]
+        tpl_seq = viewer_state["template_seq"]
+        dtw_map = viewer_state["dtw_map"]
+        match_start = viewer_state["match_start"]
+        match_end = viewer_state["match_end"]
+
+        user_total = user_seq.num_frames
+        tpl_total = tpl_seq.num_frames
+        # 夹紧到合法范围
+        uidx = max(0, min(int(user_frame_idx), user_total - 1))
+
+        # 取对应模板帧（三阶段：准备 / 匹配 / 收尾）
+        if uidx < match_start:
+            tidx = 0
+            phase = "准备"
+        elif uidx > match_end:
+            tidx = tpl_total - 1
+            phase = "收尾"
+        else:
+            if uidx in dtw_map:
+                tidx = dtw_map[uidx]
+            else:
+                keys = sorted(dtw_map.keys()) if dtw_map else []
+                if keys:
+                    nearest = min(keys, key=lambda k: abs(k - uidx))
+                    tidx = dtw_map[nearest]
+                else:
+                    # 无 DTW → 线性映射
+                    if match_end > match_start:
+                        ratio = (uidx - match_start) / (match_end - match_start)
+                        tidx = int(ratio * (tpl_total - 1))
+                    else:
+                        tidx = 0
+            phase = "同步"
+        tidx = max(0, min(tidx, tpl_total - 1))
+
+        user_frame = user_seq.frames[uidx]
+        tpl_frame = tpl_seq.frames[tidx]
+
+        # 关节偏差排序（用已有 joint_deviations，同步标注红圈）
+        deviations = viewer_state.get("joint_deviations", {})
+        # 英文名 → 索引
+        name_to_idx = {n: i for i, n in enumerate(LANDMARK_NAMES)}
+        joint_rows = []
+        for en_name, dev in deviations.items():
+            idx = name_to_idx.get(en_name)
+            if idx is None:
+                continue
+            cn = CORE_JOINT_NAMES.get(idx, en_name)
+            joint_rows.append((cn, en_name, float(dev), idx))
+        joint_rows.sort(key=lambda x: x[2], reverse=True)
+
+        # 高亮前 3 个偏差较大的关节
+        highlight = [r[3] for r in joint_rows[:3] if r[2] >= 0.08]
+
+        img_bgr = render_pair_frame(
+            user_frame=user_frame,
+            template_frame=tpl_frame,
+            user_fit_box=viewer_state.get("user_fit_box"),
+            template_fit_box=viewer_state.get("template_fit_box"),
+            width=width,
+            height=height,
+            title_left="Your Action",
+            title_right="Template",
+            highlight_joints=highlight,
+        )
+        import cv2 as _cv2
+        img_rgb = _cv2.cvtColor(img_bgr, _cv2.COLOR_BGR2RGB)
+
+        # 针对"本帧"的建议：挑出当前帧偏差大的关节名做提示
+        advice = []
+        for cn, _en, dev, _idx in joint_rows[:3]:
+            if dev < 0.08:
+                continue
+            level = "严重" if dev >= 0.18 else "中等"
+            advice.append(
+                f"• **{cn}**（偏差 {dev:.3f}，{level}）：请将 {cn} 向模板位置靠近。"
+            )
+        if not advice:
+            advice.append("✅ 本帧整体吻合，继续保持！")
+
+        step_info = (
+            f"用户帧 **{uidx + 1}/{user_total}**  ↔  "
+            f"模板帧 **{tidx + 1}/{tpl_total}**  ·  阶段：{phase}"
+        )
+
+        return {
+            "image": img_rgb,
+            "step_info": step_info,
+            "joint_table": [(cn, en, round(d, 4)) for cn, en, d, _ in joint_rows],
+            "advice_lines": advice,
+            "total_user_frames": user_total,
+        }
 
     # ================================================================
     # 内部方法
@@ -642,18 +1039,18 @@ class AppPipeline:
         if frame is None or frame.size == 0:
             return ProcessedFrame(annotated_image=frame), None
 
-        pose_frame = self._estimator.estimate_frame(frame)
+        streamer = self._ensure_rt_streamer()
+        raw = streamer.process(frame)
+        landmarks = self._rt_smoother.update(raw)
 
-        if pose_frame is None:
+        if landmarks is None:
             empty_snap = FeedbackSnapshot(has_pose=False)
             return ProcessedFrame(annotated_image=frame.copy()), empty_snap
 
-        # 绘制骨骼
+        # 用平滑后的 landmarks 构造 PoseFrame 绘制
+        draw_frame = self._landmarks_to_poseframe(landmarks)
         annotated = frame.copy()
-        draw_skeleton(annotated, pose_frame)
-
-        # 提取 landmarks
-        landmarks = pose_frame.to_numpy()  # (33, 4)
+        draw_skeleton(annotated, draw_frame)
 
         # 实时反馈分析
         snapshot = None
@@ -679,3 +1076,9 @@ class AppPipeline:
         """释放资源"""
         if hasattr(self, '_estimator') and self._estimator:
             self._estimator.close()
+        if hasattr(self, '_cam_streamer') and self._cam_streamer:
+            self._cam_streamer.close()
+            self._cam_streamer = None
+        if hasattr(self, '_rt_streamer') and self._rt_streamer:
+            self._rt_streamer.close()
+            self._rt_streamer = None

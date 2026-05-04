@@ -121,6 +121,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
 
     def on_start_cam_recording():
         """视频分析 Tab — 摄像头录制：开始"""
+        pipeline.reset_camera_smoothers()
         session.start_recording()
         return (
             "🔴 录制中… 执行动作后点击「停止录制」",
@@ -206,7 +207,8 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 gr.update(interactive=False),
             )
 
-        # 开始倒计时
+        # 重置平滑器，开始倒计时
+        pipeline.reset_camera_smoothers()
         session.start_countdown()
         return (
             "⏱️ 3... 准备好！",
@@ -365,6 +367,199 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             )
         return f"❌ 模板录入失败: {result.error}", gr.update(), gr.update()
 
+    # -- 模板管理：删除模板 --
+
+    def _list_actions_with_templates():
+        """返回包含模板的动作列表（用于删除下拉框）"""
+        return [it["action"] for it in pipeline.get_template_info() if it["count"] > 0]
+
+    def on_del_refresh_actions():
+        """刷新删除面板的动作下拉框"""
+        actions = _list_actions_with_templates()
+        default = actions[0] if actions else None
+        templates = pipeline.template_library.list_templates(default) if default else []
+        return (
+            gr.update(choices=actions, value=default),
+            gr.update(choices=templates,
+                     value=(templates[0] if templates else None)),
+        )
+
+    def on_del_action_change(action_name):
+        """动作变化时刷新模板下拉框"""
+        if not action_name:
+            return gr.update(choices=[], value=None)
+        templates = pipeline.template_library.list_templates(action_name)
+        return gr.update(choices=templates,
+                         value=(templates[0] if templates else None))
+
+    # -- 模板管理：骨骼演示视频（问题4） --
+
+    def on_tpl_preview_refresh():
+        """刷新预览面板的动作/模板下拉"""
+        actions = _list_actions_with_templates()
+        default = actions[0] if actions else None
+        templates = (pipeline.template_library.list_templates(default)
+                     if default else [])
+        first_tpl = templates[0] if templates else None
+        # 直接显示第一个模板的演示视频（若已缓存/可生成）
+        video = (pipeline.get_template_demo_path(default, first_tpl)
+                 if (default and first_tpl) else None)
+        return (
+            gr.update(choices=actions, value=default),
+            gr.update(choices=templates, value=first_tpl),
+            video,
+        )
+
+    def on_tpl_preview_action_change(action_name):
+        """预览面板：动作切换时更新模板下拉，并自动加载第一个模板的视频"""
+        if not action_name:
+            return gr.update(choices=[], value=None), None
+        templates = pipeline.template_library.list_templates(action_name)
+        first_tpl = templates[0] if templates else None
+        video = (pipeline.get_template_demo_path(action_name, first_tpl)
+                 if first_tpl else None)
+        return (
+            gr.update(choices=templates, value=first_tpl),
+            video,
+        )
+
+    def on_tpl_preview_template_change(action_name, template_name):
+        """预览面板：模板切换时自动加载对应演示视频（点击即播放）"""
+        if not action_name or not template_name:
+            return None
+        return pipeline.get_template_demo_path(action_name, template_name)
+
+    # -- 视频分析：帧对比查看器（问题5） --
+
+    def on_frame_viewer_init():
+        """
+        分析完成后：
+          1. 构建 DTW 帧映射索引（保存到 session）
+          2. 配置滑条范围 = 用户原始帧数
+          3. 立即渲染第一帧
+        """
+        res = getattr(session, "last_result", None)
+        if res is None or res.report is None:
+            return (
+                gr.update(minimum=0, maximum=0, value=0,
+                          label="对齐步骤（无可用数据）", visible=False),
+                None, "", "", "",
+                gr.update(visible=False),
+            )
+        viewer_state = pipeline.prepare_frame_viewer(res.report)
+        if viewer_state is None:
+            session.frame_viewer_state = None
+            return (
+                gr.update(minimum=0, maximum=0, value=0,
+                          label="对齐步骤（该分析不支持帧对比）", visible=False),
+                None, "", "", "",
+                gr.update(visible=False),
+            )
+        session.frame_viewer_state = viewer_state
+        total = viewer_state["total_user_frames"]
+        # 渲染第一帧
+        data = pipeline.render_viewer_frame(viewer_state, 0)
+        if data is None:
+            return (
+                gr.update(minimum=1, maximum=total, value=1, step=1,
+                          label=f"用户帧（共 {total} 帧）", visible=True),
+                None, "", "", "",
+                gr.update(visible=True),
+            )
+        tbl_md = _joint_table_md(data["joint_table"])
+        advice_md = "\n\n".join(data["advice_lines"])
+        return (
+            gr.update(minimum=1, maximum=total, value=1, step=1,
+                      label=f"用户帧（共 {total} 帧） — 拖动查看动作对比",
+                      visible=True),
+            data["image"], data["step_info"], tbl_md, advice_md,
+            gr.update(visible=True),
+        )
+
+    def on_frame_viewer_render(user_frame_1based):
+        """滑条变化：渲染指定用户帧的并排骨骼对比"""
+        viewer_state = getattr(session, "frame_viewer_state", None)
+        if viewer_state is None:
+            return None, "❌ 尚无分析结果", "", ""
+        try:
+            uidx = int(user_frame_1based) - 1
+        except (TypeError, ValueError):
+            uidx = 0
+        data = pipeline.render_viewer_frame(viewer_state, uidx)
+        if data is None:
+            return None, "❌ 渲染失败", "", ""
+        tbl_md = _joint_table_md(data["joint_table"])
+        advice_md = "\n\n".join(data["advice_lines"])
+        return data["image"], data["step_info"], tbl_md, advice_md
+
+    def _joint_table_md(rows):
+        """将 [(中文, 英文, 偏差), ...] 渲染为 markdown 表格"""
+        lines = ["| 关节 | 英文名 | 偏差 |", "|---|---|---|"]
+        for cn, en, dev in rows[:12]:
+            mark = "🔴" if dev >= 0.18 else ("🟡" if dev >= 0.08 else "🟢")
+            lines.append(f"| {mark} {cn} | `{en}` | {dev:.4f} |")
+        return "\n".join(lines)
+
+    def on_delete_template(action_name, template_name):
+        """执行删除"""
+        if not action_name:
+            return (
+                "⚠️ 请选择动作类别",
+                gr.update(), gr.update(), gr.update(), gr.update(),
+            )
+        if not template_name:
+            return (
+                "⚠️ 请选择要删除的模板",
+                gr.update(), gr.update(), gr.update(), gr.update(),
+            )
+        result = pipeline.delete_template(action_name, template_name,
+                                          auto_remove_empty_action=True)
+
+        # 刷新会话动作列表与所有下拉框
+        session.refresh_action_list()
+        action_choices = session.get_action_choices()
+
+        # 删除面板的下拉框
+        remain_actions = _list_actions_with_templates()
+        new_action = (action_name
+                      if action_name in remain_actions
+                      else (remain_actions[0] if remain_actions else None))
+        remain_templates = (pipeline.template_library.list_templates(new_action)
+                            if new_action else [])
+
+        return (
+            result["message"],
+            gr.update(choices=remain_actions, value=new_action),
+            gr.update(choices=remain_templates,
+                      value=(remain_templates[0] if remain_templates else None)),
+            # 同步视频分析 & 实时模式的动作下拉
+            gr.update(choices=action_choices),
+            gr.update(choices=action_choices),
+        )
+
+    def on_delete_action(action_name):
+        """删除整个动作类别（及所有模板）"""
+        if not action_name:
+            return (
+                "⚠️ 请选择动作类别",
+                gr.update(), gr.update(), gr.update(), gr.update(),
+            )
+        result = pipeline.delete_action(action_name)
+        session.refresh_action_list()
+        action_choices = session.get_action_choices()
+        remain_actions = _list_actions_with_templates()
+        new_action = remain_actions[0] if remain_actions else None
+        remain_templates = (pipeline.template_library.list_templates(new_action)
+                            if new_action else [])
+        return (
+            result["message"],
+            gr.update(choices=remain_actions, value=new_action),
+            gr.update(choices=remain_templates,
+                      value=(remain_templates[0] if remain_templates else None)),
+            gr.update(choices=action_choices),
+            gr.update(choices=action_choices),
+        )
+
     # -- 模板管理：摄像头录制模板 --
 
     def on_tpl_cam_frame(frame):
@@ -379,6 +574,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
 
     def on_tpl_start_recording():
         """模板管理 — 开始录制"""
+        pipeline.reset_camera_smoothers()
         session.start_recording()
         return (
             "🔴 录制中… 请执行标准动作，完成后点击「停止录制」",
@@ -514,6 +710,38 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                             height=360,
                         )
 
+                # ===== 帧对比查看器（问题5） =====
+                with gr.Group(visible=False) as frame_viewer_group:
+                    gr.Markdown("### 🔍 帧对比查看器 — 拖动滑条查看每一帧的差异")
+                    gr.Markdown(
+                        "> 左侧为您的动作骨骼，右侧为模板骨骼。"
+                        "红圈表示该帧偏差较大的关节。"
+                        "下方会列出该帧的逐关节偏差以及针对性建议。"
+                    )
+                    with gr.Row():
+                        frame_viewer_slider = gr.Slider(
+                            minimum=0, maximum=0, value=0, step=1,
+                            label="对齐步骤",
+                            interactive=True,
+                            visible=False,
+                        )
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            frame_viewer_image = gr.Image(
+                                label="🦴 并排骨骼对比",
+                                type="numpy",
+                                interactive=False,
+                                height=400,
+                            )
+                            frame_viewer_info = gr.Markdown("")
+                        with gr.Column(scale=1):
+                            frame_viewer_table = gr.Markdown(
+                                "当前帧的关节偏差表会显示在这里。"
+                            )
+                            frame_viewer_advice = gr.Markdown(
+                                "", label="针对该帧的建议",
+                            )
+
             # -- 摄像头录制子模式 --
             with gr.Column(visible=False) as cam_record_col:
                 with gr.Row():
@@ -568,11 +796,32 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 outputs=[upload_col, cam_record_col],
             )
 
-            # 上传视频分析
+            # 上传视频分析 — 分析完成后自动初始化帧对比查看器并渲染首帧
             analyze_btn.click(
                 fn=on_analyze_video,
                 inputs=[video_input, vid_action_dropdown, vid_algo_dropdown],
                 outputs=[vid_report, vid_plot, vid_summary, vid_comparison],
+            ).then(
+                fn=on_frame_viewer_init,
+                outputs=[
+                    frame_viewer_slider,
+                    frame_viewer_image,
+                    frame_viewer_info,
+                    frame_viewer_table,
+                    frame_viewer_advice,
+                    frame_viewer_group,
+                ],
+            )
+
+            # 滑条拖动时刷新帧对比图
+            frame_viewer_slider.change(
+                fn=on_frame_viewer_render,
+                inputs=[frame_viewer_slider],
+                outputs=[
+                    frame_viewer_image, frame_viewer_info,
+                    frame_viewer_table, frame_viewer_advice,
+                ],
+                show_progress="hidden",
             )
 
             # 摄像头录制
@@ -594,6 +843,16 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                     cam_rec_status,
                     cam_rec_report, cam_rec_plot, vid_comparison,
                     cam_rec_start, cam_rec_stop,
+                ],
+            ).then(
+                fn=on_frame_viewer_init,
+                outputs=[
+                    frame_viewer_slider,
+                    frame_viewer_image,
+                    frame_viewer_info,
+                    frame_viewer_table,
+                    frame_viewer_advice,
+                    frame_viewer_group,
                 ],
             )
 
@@ -781,6 +1040,81 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                                     interactive=False,
                                 )
 
+            # ================== 模板骨骼演示（问题4） ==================
+            gr.Markdown("---")
+            gr.Markdown("#### 🦴 模板骨骼演示视频")
+            gr.Markdown(
+                "> 每个录入的模板都会自动生成骨骼演示视频。"
+                "直接选择动作类别和模板名称即可播放对应的骨骼动画，"
+                "风格与视频分析中【骨骼对比视频】的模板半区一致。"
+            )
+
+            with gr.Row():
+                _init_prev_actions = _list_actions_with_templates()
+                _init_prev_action = _init_prev_actions[0] if _init_prev_actions else None
+                _init_prev_tpls = (
+                    pipeline.template_library.list_templates(_init_prev_action)
+                    if _init_prev_action else []
+                )
+                _init_prev_tpl = _init_prev_tpls[0] if _init_prev_tpls else None
+                _init_prev_video = (
+                    pipeline.get_template_demo_path(
+                        _init_prev_action, _init_prev_tpl)
+                    if _init_prev_action and _init_prev_tpl else None
+                )
+
+                prev_action_dropdown = gr.Dropdown(
+                    choices=_init_prev_actions,
+                    value=_init_prev_action,
+                    label="动作类别",
+                )
+                prev_template_dropdown = gr.Dropdown(
+                    choices=_init_prev_tpls,
+                    value=_init_prev_tpl,
+                    label="模板名称",
+                )
+                prev_refresh_btn = gr.Button("🔄 刷新列表")
+
+            prev_video = gr.Video(
+                label="🎬 模板骨骼演示",
+                value=_init_prev_video,
+                height=400,
+                autoplay=True,
+            )
+
+            # ================== 删除模板 ==================
+            gr.Markdown("---")
+            gr.Markdown("#### 🗑️ 删除模板")
+            gr.Markdown(
+                "> 选择动作类别和模板名称，点击「删除」即可移除。"
+                "当某动作下的最后一个模板被删除时，该动作类别也会一并从下拉列表中移除，"
+                "其他 Tab（视频分析 / 实时模式）会立即同步更新。"
+            )
+
+            with gr.Row():
+                _init_del_actions = _list_actions_with_templates()
+                _init_del_action = _init_del_actions[0] if _init_del_actions else None
+                _init_del_tpls = (
+                    pipeline.template_library.list_templates(_init_del_action)
+                    if _init_del_action else []
+                )
+
+                del_action_dropdown = gr.Dropdown(
+                    choices=_init_del_actions,
+                    value=_init_del_action,
+                    label="动作类别",
+                )
+                del_template_dropdown = gr.Dropdown(
+                    choices=_init_del_tpls,
+                    value=(_init_del_tpls[0] if _init_del_tpls else None),
+                    label="模板名称",
+                )
+                del_refresh_btn = gr.Button("🔄 刷新")
+                del_template_btn = gr.Button("🗑️ 删除模板", variant="stop")
+                del_action_btn = gr.Button("💥 删除整个动作", variant="stop")
+
+            del_status = gr.Textbox(label="删除状态", interactive=False)
+
             # -- 绑定事件 --
             refresh_btn.click(
                 fn=on_refresh_templates, outputs=[template_info]
@@ -789,6 +1123,56 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 fn=on_record_template,
                 inputs=[tpl_video, tpl_name_input],
                 outputs=[upload_status, vid_action_dropdown, rt_action_dropdown],
+            )
+
+            # 模板预览绑定（点击即播放，无需"生成"按钮）
+            prev_refresh_btn.click(
+                fn=on_tpl_preview_refresh,
+                outputs=[
+                    prev_action_dropdown, prev_template_dropdown, prev_video,
+                ],
+            )
+            prev_action_dropdown.change(
+                fn=on_tpl_preview_action_change,
+                inputs=[prev_action_dropdown],
+                outputs=[prev_template_dropdown, prev_video],
+            )
+            prev_template_dropdown.change(
+                fn=on_tpl_preview_template_change,
+                inputs=[prev_action_dropdown, prev_template_dropdown],
+                outputs=[prev_video],
+            )
+
+            del_refresh_btn.click(
+                fn=on_del_refresh_actions,
+                outputs=[del_action_dropdown, del_template_dropdown],
+            )
+            del_action_dropdown.change(
+                fn=on_del_action_change,
+                inputs=[del_action_dropdown],
+                outputs=[del_template_dropdown],
+            )
+            del_template_btn.click(
+                fn=on_delete_template,
+                inputs=[del_action_dropdown, del_template_dropdown],
+                outputs=[
+                    del_status,
+                    del_action_dropdown,
+                    del_template_dropdown,
+                    vid_action_dropdown,
+                    rt_action_dropdown,
+                ],
+            )
+            del_action_btn.click(
+                fn=on_delete_action,
+                inputs=[del_action_dropdown],
+                outputs=[
+                    del_status,
+                    del_action_dropdown,
+                    del_template_dropdown,
+                    vid_action_dropdown,
+                    rt_action_dropdown,
+                ],
             )
 
             # 摄像头录制模板

@@ -54,6 +54,11 @@ class TemplateLibrary:
             self._metadata = {"actions": {}}
             self._save_metadata()
 
+    @property
+    def root(self) -> Path:
+        """模板根目录（只读）"""
+        return self._root
+
     def _save_metadata(self):
         """保存元信息"""
         with open(self._metadata_path, "w", encoding="utf-8") as f:
@@ -147,11 +152,56 @@ class TemplateLibrary:
         path = self._root / action / f"{template_name}.json"
         if path.exists():
             path.unlink()
+            # 连同演示视频一并清理（若存在）
+            demo_path = self._root / action / f"{template_name}.demo.mp4"
+            if demo_path.exists():
+                try:
+                    demo_path.unlink()
+                except Exception as e:
+                    logger.warning(f"清理演示视频失败 {demo_path}: {e}")
             count = len(list((self._root / action).glob("*.json")))
             if action in self._metadata["actions"]:
                 self._metadata["actions"][action]["template_count"] = count
                 self._save_metadata()
             logger.info(f"删除模板: {action}/{template_name}")
+
+    def delete_action(self, action: str, remove_empty_dir: bool = True) -> bool:
+        """
+        删除一个动作类别（及其下所有模板）
+
+        Args:
+            action: 动作名称
+            remove_empty_dir: 是否删除空目录
+
+        Returns:
+            是否成功删除
+        """
+        action_dir = self._root / action
+        if action_dir.exists():
+            for tpl in action_dir.glob("*.json"):
+                try:
+                    tpl.unlink()
+                except Exception as e:
+                    logger.warning(f"删除模板失败 {tpl}: {e}")
+            # 一并清理演示视频
+            for demo in action_dir.glob("*.demo.mp4"):
+                try:
+                    demo.unlink()
+                except Exception as e:
+                    logger.warning(f"清理演示视频失败 {demo}: {e}")
+            if remove_empty_dir:
+                try:
+                    action_dir.rmdir()
+                except OSError:
+                    # 目录非空或其他原因，忽略
+                    pass
+
+        if action in self._metadata.get("actions", {}):
+            del self._metadata["actions"][action]
+            self._save_metadata()
+            logger.info(f"删除动作类别: {action}")
+            return True
+        return False
 
     def load_all_templates(self, action: str) -> Dict[str, PoseSequence]:
         """加载某个动作类别下的所有模板"""

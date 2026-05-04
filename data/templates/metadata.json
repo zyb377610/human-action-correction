@@ -49,6 +49,16 @@
       "display_name": "throw2",
       "description": "",
       "template_count": 1
+    },
+    "push": {
+      "display_name": "push",
+      "description": "",
+      "template_count": 1
+    },
+    "test_realtime": {
+      "display_name": "test_realtime",
+      "description": "",
+      "template_count": 1
     }
   }
 }

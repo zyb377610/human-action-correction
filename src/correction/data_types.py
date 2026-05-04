@@ -87,6 +87,22 @@ class CorrectionReport:
     angle_deviations: Dict[str, tuple] = field(default_factory=dict)
     confidence: float = 0.0
 
+    # 关节中文名映射（供格式化显示用）
+    joint_display_map: Dict[str, str] = field(default_factory=dict)
+
+    # 逐帧对齐详情（FrameDeviationDetail 列表），便于按帧展开建议
+    frame_details: List = field(default_factory=list)
+
+    # 模板权威性：被模板"声明"为不可见、因而未参与对比/建议的关节中文名
+    excluded_joints: List[str] = field(default_factory=list)
+
+    # 模板信息（可选，用于报告展示）
+    template_name: str = ""
+
+    # 问题5 新增：若判定"动作不符合模板"，则不再给出具体矫正建议
+    mismatch: bool = False
+    mismatch_reason: str = ""
+
     # 内部数据（供对比视频生成使用，不参与序列化）
     _best_template: object = field(default=None, repr=False)
     _comparison_result: object = field(default=None, repr=False)
@@ -99,36 +115,125 @@ class CorrectionReport:
             格式化的报告文本
         """
         lines = [
-            "=" * 50,
+            "=" * 60,
             "  动作矫正报告",
-            "=" * 50,
+            "=" * 60,
             "",
             f"【动作类别】{self.action_display_name or self.action_name}",
             f"【质量评分】{self.quality_score:.1f} / 100",
             f"【相似度】  {self.similarity:.1%}",
             f"【偏差程度】{_severity_cn(self.severity)}",
+        ]
+        if self.template_name:
+            lines.append(f"【匹配模板】{self.template_name}")
+        if self.excluded_joints:
+            lines.append(
+                "【模板关注范围】已自动剔除模板中不可见的关节：" +
+                "、".join(self.excluded_joints)
+            )
+        lines.extend([
             "",
             f"【整体评语】{self.overall_comment}",
             "",
-        ]
+        ])
 
+        # ========== 动作不符合模式：不给出具体建议 ==========
+        if self.mismatch:
+            lines.append("-" * 60)
+            lines.append("  ⛔ 动作不符合")
+            lines.append("-" * 60)
+            lines.append(
+                f"  与「{self.action_display_name or self.action_name}」"
+                "模板的相似度过低，系统认为本次动作与该模板不是同一类动作，"
+                "因此不再给出具体矫正建议，避免误导。"
+            )
+            if self.mismatch_reason:
+                lines.append(f"  判定依据: {self.mismatch_reason}")
+            lines.append("")
+            lines.append("  👉 建议：请重新确认所选动作类型，或换个与目标"
+                         "模板更接近的动作重试。")
+            lines.append("")
+            lines.append("=" * 60)
+            return "\n".join(lines)
+
+        # ========== 矫正建议 ==========
         if self.corrections:
-            lines.append("-" * 50)
-            lines.append("  矫正建议（按优先级排序）")
-            lines.append("-" * 50)
+            lines.append("-" * 60)
+            lines.append(f"  矫正建议（共 {len(self.corrections)} 条，按优先级排序）")
+            lines.append("-" * 60)
             for i, item in enumerate(self.corrections, 1):
                 priority_tag = _priority_tag(item.priority)
-                lines.append(f"")
-                lines.append(f"  {i}. {priority_tag} {item.joint_display_name}")
+                lines.append("")
+                lines.append(
+                    f"  {i}. {priority_tag} {item.joint_display_name} "
+                    f"(偏差 {item.deviation:.4f})"
+                )
                 lines.append(f"     问题: {item.description}")
                 lines.append(f"     建议: {item.advice}")
                 if item.angle_diff is not None:
-                    lines.append(f"     角度偏差: 约{abs(item.angle_diff):.0f}°")
+                    lines.append(f"     角度偏差: 约 {abs(item.angle_diff):.0f}°")
         else:
-            lines.append("  动作表现良好，无需特别矫正。")
+            lines.append("  ✅ 动作表现良好，无需特别矫正。")
+
+        # ========== 逐关节偏差明细 ==========
+        if self.joint_deviations:
+            lines.append("")
+            lines.append("-" * 60)
+            lines.append("  逐关节偏差明细（按偏差降序）")
+            lines.append("-" * 60)
+            sorted_joints = sorted(
+                self.joint_deviations.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            for en_name, dev in sorted_joints:
+                cn = self.joint_display_map.get(en_name, en_name)
+                level = _deviation_level(dev)
+                lines.append(
+                    f"  {level}  {cn:<6s} ({en_name:<20s}) "
+                    f"偏差={dev:.4f}"
+                )
+
+        # ========== 关节角度对比 ==========
+        if self.angle_deviations:
+            lines.append("")
+            lines.append("-" * 60)
+            lines.append("  关节角度对比（用户 vs 模板）")
+            lines.append("-" * 60)
+            from src.correction.angle_utils import ANGLE_DISPLAY_NAMES
+            for name, vals in self.angle_deviations.items():
+                if not (isinstance(vals, (tuple, list)) and len(vals) == 3):
+                    continue
+                u, t, d = vals
+                cn = ANGLE_DISPLAY_NAMES.get(name, name)
+                tag = "⚠" if abs(d) >= 10 else " "
+                lines.append(
+                    f"  {tag} {cn:<8s} 用户 {u:6.1f}° | 模板 {t:6.1f}° | 差 {d:+6.1f}°"
+                )
+
+        # ========== 逐帧对齐详情 ==========
+        if self.frame_details:
+            lines.append("")
+            lines.append("-" * 60)
+            lines.append(
+                f"  逐帧对齐明细（共 {len(self.frame_details)} 步，"
+                f"仅列出偏差最大的关节）"
+            )
+            lines.append("-" * 60)
+            lines.append(
+                f"  {'步':>4} | {'用户帧':>6} | {'模板帧':>6} | "
+                f"{'偏差最大关节':<10s} | {'该关节偏差':>10s} | {'总偏差':>8s}"
+            )
+            for step, d in enumerate(self.frame_details, 1):
+                mark = _deviation_level(d.worst_joint_deviation)
+                lines.append(
+                    f"  {step:>4d} | {d.user_frame:>6d} | {d.template_frame:>6d} | "
+                    f"{mark} {d.worst_joint_display:<8s} | "
+                    f"{d.worst_joint_deviation:>10.4f} | {d.total_deviation:>8.4f}"
+                )
 
         lines.append("")
-        lines.append("=" * 50)
+        lines.append("=" * 60)
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
@@ -187,3 +292,12 @@ def _priority_tag(priority: str) -> str:
         PRIORITY_LOW: "[ℹ 低]",
     }
     return mapping.get(priority, f"[{priority}]")
+
+
+def _deviation_level(dev: float) -> str:
+    """根据偏差值返回一个视觉标签，用于文本报告排版"""
+    if dev >= 0.18:
+        return "🔴"
+    if dev >= 0.08:
+        return "🟡"
+    return "🟢"

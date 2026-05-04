@@ -508,15 +508,18 @@ class RealtimeFeedbackEngine:
             if abs(deviation) < self._angle_threshold:
                 continue
 
+            # 将 "left_knee_angle" → "left_knee" 作为 advice_map / 显示名 key
+            base_key = joint_name[:-6] if joint_name.endswith("_angle") else joint_name
+
             # 去重检查
-            dedup_key = f"{joint_name}_{('small' if deviation < 0 else 'large')}"
+            dedup_key = f"{base_key}_{('small' if deviation < 0 else 'large')}"
             last_shown = self._dedup_cache.get(dedup_key, 0.0)
             if (now - last_shown) < self._dedup_interval:
                 continue
 
             # 生成建议
             direction = "small" if deviation < 0 else "large"
-            advice_map = ANGLE_ADVICE.get(joint_name, {})
+            advice_map = ANGLE_ADVICE.get(base_key, {})
             advice = advice_map.get(
                 direction,
                 f"{'角度过小' if direction == 'small' else '角度过大'}，请调整"
@@ -532,8 +535,8 @@ class RealtimeFeedbackEngine:
                 severity = Severity.INFO
 
             items.append(FeedbackItem(
-                joint_name=joint_name,
-                joint_display=JOINT_DISPLAY_NAMES.get(joint_name, joint_name),
+                joint_name=base_key,
+                joint_display=JOINT_DISPLAY_NAMES.get(base_key, base_key),
                 deviation_deg=abs_dev,
                 direction="角度过小" if direction == "small" else "角度过大",
                 advice=advice,

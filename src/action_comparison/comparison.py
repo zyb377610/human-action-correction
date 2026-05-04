@@ -36,6 +36,10 @@ class ComparisonResult:
     metric: str = ""                         # 使用的距离度量
     template_name: str = ""                  # 匹配的模板名称
 
+    # 以下字段在 ActionComparator.compare() 内部填充
+    processed_query: Optional[PoseSequence] = None      # 预处理后的用户序列（path 索引对应）
+    processed_template: Optional[PoseSequence] = None   # 预处理后的模板序列（path 索引对应）
+
     @property
     def path_length(self) -> int:
         return len(self.path)
@@ -171,6 +175,8 @@ class ActionComparator:
             algorithm=self._algorithm,
             metric=self._metric,
             template_name=template_name,
+            processed_query=query,
+            processed_template=template,
         )
 
         # 存储裁剪信息，供对比视频生成时使用

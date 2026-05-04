@@ -45,6 +45,9 @@ correction:
   quality_good: 70                       # 良好评分线
   quality_fair: 50                       # 需改进评分线
   max_suggestions: 10                    # 最大建议条数
+  # 动作"不符合"阈值：若最佳模板相似度低于该值，判定动作与模板不匹配，
+  # 不再给出具体矫正建议（避免误导）。推荐 0.45~0.55。
+  mismatch_similarity_threshold: 0.5
 
 # -------------------------
 # Web 服务配置

@@ -53,6 +53,7 @@ class CorrectionPipeline:
         top_k: int = 5,
         preprocess: bool = True,
         target_frames: Optional[int] = 60,
+        mismatch_similarity_threshold: Optional[float] = None,
     ):
         """
         Args:
@@ -64,6 +65,7 @@ class CorrectionPipeline:
             top_k: 偏差分析 top-K 关节数
             preprocess: 是否预处理序列
             target_frames: 预处理目标帧数
+            mismatch_similarity_threshold: "动作不符合"阈值；None 时从配置读取
         """
         # 模板库
         self._library = TemplateLibrary(templates_dir)
@@ -91,10 +93,30 @@ class CorrectionPipeline:
         self._checkpoint_path = checkpoint_path
         self._model_type = model_type
 
+        # "不符合"判定阈值（从配置读取默认值）
+        if mismatch_similarity_threshold is None:
+            try:
+                from src.utils.config import get_config
+                cfg = get_config().get_section("correction")
+                mismatch_similarity_threshold = float(
+                    cfg.get("mismatch_similarity_threshold", 0.5)
+                )
+            except Exception:
+                mismatch_similarity_threshold = 0.5
+        self._mismatch_threshold = float(mismatch_similarity_threshold)
+
         logger.info(
             f"CorrectionPipeline 初始化完成: algorithm={algorithm}, "
-            f"metric={metric}, auto_mode={'可用' if checkpoint_path else '不可用'}"
+            f"metric={metric}, auto_mode={'可用' if checkpoint_path else '不可用'}, "
+            f"mismatch_threshold={self._mismatch_threshold}"
         )
+
+    @property
+    def mismatch_threshold(self) -> float:
+        return self._mismatch_threshold
+
+    def set_mismatch_threshold(self, value: float):
+        self._mismatch_threshold = float(value)
 
     def _get_predictor(self):
         """延迟加载分类模型"""
@@ -210,10 +232,25 @@ class CorrectionPipeline:
         # 存储内部数据供对比视频生成
         report._best_template = best_template
         report._comparison_result = best_result
+        report._user_sequence = user_sequence    # 供帧对比查看器使用（原始未预处理）
+        report.template_name = best_template_name
+
+        # ===== 动作"不符合"判定 =====
+        # 若与最佳模板相似度低于阈值，清空具体建议，标记为 mismatch
+        if best_result.similarity < self._mismatch_threshold:
+            report.mismatch = True
+            report.mismatch_reason = (
+                f"相似度 {best_result.similarity:.2%} 低于不符合阈值 "
+                f"{self._mismatch_threshold:.2%}"
+            )
+            # 清空矫正建议，避免误导
+            report.corrections = []
+            # 覆盖整体评语
+            report.overall_comment = "本次动作与该模板差异过大，不建议基于此给出矫正提示。"
 
         logger.info(
             f"矫正报告生成完成: 评分={report.quality_score:.1f}, "
-            f"建议数={report.num_corrections}"
+            f"建议数={report.num_corrections}, 不符合={report.mismatch}"
         )
 
         return report
