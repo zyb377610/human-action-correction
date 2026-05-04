@@ -303,19 +303,20 @@ def compute_dtw(
         q_feat = query
         t_feat = template
 
-    # Step 2: 子序列 DTW — 始终启用，双向支持
-    # 等长时退化为经典 DTW（匹配段覆盖全序列，行为一致）
+    # Step 2: 子序列 DTW — 以模板为权威
+    # 策略：允许"用户序列"在任意位置开始/结束对应模板（用户开端/收尾弹性），
+    # 但**模板必须从第一帧到最后一帧都被覆盖**。这样:
+    #   - 用户若只做了模板的一部分 → 剩余模板帧会强制匹配到某一个残余帧，
+    #     距离会累积很大 → 原始相似度自然下降
+    #   - 用户若中间有停顿/准备段 → 允许出现在匹配段之前或之后，不影响评分
+    #
+    # 实现：始终把模板当第二维，用户当第一维，交给 subsequence_dtw。
+    #       当用户序列比模板短时，subsequence_dtw 内部回退到 classic DTW。
+    # ❗❗❗ 不再因模板更长而交换角色（那样会让模板被截断、用户完成一小段就拿高分）
     if use_subsequence:
-        if len(q_feat) >= len(t_feat):
-            distance, path, cost, _, _ = subsequence_dtw(
-                q_feat, t_feat, dist_func, window_size
-            )
-        else:
-            # template 更长：交换角色，在 template 中找 query 的匹配段
-            distance, path, cost, _, _ = subsequence_dtw(
-                t_feat, q_feat, dist_func, window_size
-            )
-            path = [(j, i) for i, j in path]
+        distance, path, cost, _, _ = subsequence_dtw(
+            q_feat, t_feat, dist_func, window_size
+        )
         return distance, path, cost
 
     if algorithm in ("dtw", "ddtw"):

@@ -235,21 +235,46 @@ class CorrectionPipeline:
         report._user_sequence = user_sequence    # 供帧对比查看器使用（原始未预处理）
         report.template_name = best_template_name
 
+        # 把覆盖度相关字段透传到报告，便于 UI / 文本报告展示
+        report.raw_similarity = float(getattr(best_result, "raw_similarity", best_result.similarity))
+        report.template_coverage = float(getattr(best_result, "template_coverage", 1.0))
+        report.coverage_factor = float(getattr(best_result, "coverage_factor", 1.0))
+
         # ===== 动作"不符合"判定 =====
-        # 若与最佳模板相似度低于阈值，清空具体建议，标记为 mismatch
-        if best_result.similarity < self._mismatch_threshold:
+        # 两种情况触发 mismatch：
+        #   a) 完成度过低 → coverage_factor < 0.1（即使差一点点也会被严重惩罚）
+        #   b) 姿势质量过低（raw_similarity）→ 动作本身不对
+        raw_sim = report.raw_similarity
+        too_incomplete = report.coverage_factor < 0.1
+        too_dissimilar = raw_sim < self._mismatch_threshold
+
+        if too_incomplete or too_dissimilar:
             report.mismatch = True
-            report.mismatch_reason = (
-                f"相似度 {best_result.similarity:.2%} 低于不符合阈值 "
-                f"{self._mismatch_threshold:.2%}"
-            )
-            # 清空矫正建议，避免误导
+            if too_incomplete:
+                # 完成度不足优先作为主要原因
+                report.mismatch_reason = (
+                    f"动作完成度仅 {report.template_coverage:.1%}，"
+                    f"低于最低阈值 {self._comparator._coverage_hard_floor:.0%} — "
+                    f"用户动作只覆盖了模板的一小段，无法进行有效矫正"
+                )
+                report.overall_comment = (
+                    "本次动作未覆盖模板的足够部分，不建议基于此给出矫正提示。"
+                )
+            else:
+                report.mismatch_reason = (
+                    f"相似度 {raw_sim:.2%} 低于不符合阈值 "
+                    f"{self._mismatch_threshold:.2%}"
+                )
+                report.overall_comment = (
+                    "本次动作与该模板差异过大，不建议基于此给出矫正提示。"
+                )
+            # 清空矫正建议
             report.corrections = []
-            # 覆盖整体评语
-            report.overall_comment = "本次动作与该模板差异过大，不建议基于此给出矫正提示。"
 
         logger.info(
             f"矫正报告生成完成: 评分={report.quality_score:.1f}, "
+            f"相似度={report.similarity:.2%}(raw={raw_sim:.2%}), "
+            f"完成度={report.template_coverage:.2%}, "
             f"建议数={report.num_corrections}, 不符合={report.mismatch}"
         )
 

@@ -103,6 +103,11 @@ class CorrectionReport:
     mismatch: bool = False
     mismatch_reason: str = ""
 
+    # === 完成度相关（来自 ComparisonResult）===
+    raw_similarity: float = 0.0        # 未应用覆盖度惩罚前的相似度
+    template_coverage: float = 1.0     # 用户动作覆盖模板的比例 [0, 1]
+    coverage_factor: float = 1.0       # 覆盖度惩罚因子 [0, 1]
+
     # 内部数据（供对比视频生成使用，不参与序列化）
     _best_template: object = field(default=None, repr=False)
     _comparison_result: object = field(default=None, repr=False)
@@ -121,7 +126,17 @@ class CorrectionReport:
             "",
             f"【动作类别】{self.action_display_name or self.action_name}",
             f"【质量评分】{self.quality_score:.1f} / 100",
-            f"【相似度】  {self.similarity:.1%}",
+            "",
+            "【评分维度】",
+            f"  ├─ 姿势质量 {self.raw_similarity:.1%}  "
+            f"（仅看动作做得对不对，忽略完成度）",
+            f"  ├─ 完成度   {self.template_coverage:.1%}  "
+            f"（用户动作覆盖了模板的比例）",
+            f"  └─ 折算后相似度 {self.similarity:.1%}  "
+            f"（= 姿势质量 × 完成度函数 {self.coverage_factor:.0%}）"
+            if self.coverage_factor < 0.999 else
+            f"  └─ 折算后相似度 {self.similarity:.1%}  （完成度达标，无折算）",
+            "",
             f"【偏差程度】{_severity_cn(self.severity)}",
         ]
         if self.template_name:

@@ -169,14 +169,21 @@ class AngleCalculator:
         """
         user_arr = user_seq.to_numpy()    # (N, 33, 4)
         tmpl_arr = template_seq.to_numpy()  # (M, 33, 4)
+        n_user = len(user_arr)
+        n_tmpl = len(tmpl_arr)
 
         angle_diffs = {name: [] for name in self._definitions}
         user_angles_all = {name: [] for name in self._definitions}
         tmpl_angles_all = {name: [] for name in self._definitions}
 
         for i, j in path:
-            user_angles = self.compute_frame_angles(user_arr[i])
-            tmpl_angles = self.compute_frame_angles(tmpl_arr[j])
+            # path 索引可能来自预处理（重采样）后的序列，超过原始序列长度时夹紧
+            ii = min(int(i), n_user - 1) if n_user > 0 else 0
+            jj = min(int(j), n_tmpl - 1) if n_tmpl > 0 else 0
+            if n_user == 0 or n_tmpl == 0:
+                continue
+            user_angles = self.compute_frame_angles(user_arr[ii])
+            tmpl_angles = self.compute_frame_angles(tmpl_arr[jj])
 
             for name in self._definitions:
                 u_a = user_angles[name]
@@ -187,9 +194,12 @@ class AngleCalculator:
 
         result = {}
         for name in self._definitions:
-            user_mean = float(np.mean(user_angles_all[name]))
-            tmpl_mean = float(np.mean(tmpl_angles_all[name]))
-            diff_mean = float(np.mean(angle_diffs[name]))
+            if user_angles_all[name]:
+                user_mean = float(np.nanmean(user_angles_all[name]))
+                tmpl_mean = float(np.nanmean(tmpl_angles_all[name]))
+                diff_mean = float(np.nanmean(angle_diffs[name]))
+            else:
+                user_mean = tmpl_mean = diff_mean = 0.0
             result[name] = (user_mean, tmpl_mean, diff_mean)
 
         return result

@@ -58,9 +58,16 @@ class AnalysisResult:
         lines = [
             f"🏋️ 动作: {self.action_display_name or self.action_name}",
             f"📊 评分: {self.quality_score:.1f} / 100",
-            f"📏 相似度: {self.similarity:.1%}",
-            f"📝 矫正建议: {self.num_corrections} 条",
         ]
+        # 若有 report 对象，展示姿势质量 + 完成度两个维度
+        if self.report is not None:
+            raw = getattr(self.report, "raw_similarity", None)
+            cov = getattr(self.report, "template_coverage", None)
+            if raw is not None and cov is not None:
+                lines.append(f"   ├─ 姿势质量: {raw:.1%}")
+                lines.append(f"   └─ 完成度:  {cov:.1%}")
+        lines.append(f"📏 折算相似度: {self.similarity:.1%}")
+        lines.append(f"📝 矫正建议: {self.num_corrections} 条")
         if self.confidence is not None:
             lines.insert(1, f"🎯 识别置信度: {self.confidence:.1%}")
         if self.algorithm_used:

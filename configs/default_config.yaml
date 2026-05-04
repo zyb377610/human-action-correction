@@ -49,6 +49,18 @@ correction:
   # 不再给出具体矫正建议（避免误导）。推荐 0.45~0.55。
   mismatch_similarity_threshold: 0.5
 
+  # === 完成度相关 ===
+  # 完成度 = cropped_q / cropped_t（裁剪后用户帧数 / 裁剪后模板帧数）
+  # 反映用户动作时长覆盖模板的比例。
+  # 评分规则（双阀限 + 二次曲线）：
+  #   coverage ≤ hard_floor         → factor = 0（评分归零、判定为不符合）
+  #   coverage ≥ min_full           → factor = 1（不降分，视为完整完成）
+  #   hard_floor < coverage < min_full → factor = t² 插值（接近 1 时奖励明显）
+  # 最终评分 = raw_similarity × factor
+  # 报告中同时展示"姿势质量"(raw_similarity) 与"完成度"(coverage) 两个维度
+  coverage_min_full: 0.90                # 达到 90% 才视作"完整完成"，给满分
+  coverage_hard_floor: 0.30              # 低于 30% 直接归零
+
 # -------------------------
 # Web 服务配置
 # -------------------------
