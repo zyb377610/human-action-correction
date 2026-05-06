@@ -64,6 +64,200 @@ ALGORITHM_CHOICES = [
 ]
 
 
+# ================================================================
+# 帧对比查看器 — 逐帧建议生成辅助函数
+# ================================================================
+
+def _poseframe_to_array(pf) -> "np.ndarray":
+    """将 PoseFrame 转为 (N, 4) numpy 数组 [x, y, z, visibility]"""
+    n = len(pf.landmarks)
+    arr = np.zeros((n, 4), dtype=np.float64)
+    for j, lm in enumerate(pf.landmarks):
+        arr[j, 0] = lm.x
+        arr[j, 1] = lm.y
+        arr[j, 2] = lm.z
+        arr[j, 3] = lm.visibility
+    return arr
+
+
+def _torso_length(arr: np.ndarray) -> float:
+    """计算躯干长度（双肩中点 → 双髋中点），用于尺度归一化"""
+    sx = (arr[11, 0] + arr[12, 0]) / 2.0
+    sy = (arr[11, 1] + arr[12, 1]) / 2.0
+    hx = (arr[23, 0] + arr[24, 0]) / 2.0
+    hy = (arr[23, 1] + arr[24, 1]) / 2.0
+    return float(np.sqrt((sx - hx) ** 2 + (sy - hy) ** 2))
+
+
+# 缓存规则引擎（避免每次滑条拖动都重新加载规则）
+_viewer_rule_engine_cache = None
+
+
+def _get_viewer_rule_engine():
+    """获取缓存的规则引擎实例"""
+    global _viewer_rule_engine_cache
+    if _viewer_rule_engine_cache is None:
+        from src.correction.rules import CorrectionRuleEngine
+        _viewer_rule_engine_cache = CorrectionRuleEngine()
+    return _viewer_rule_engine_cache
+
+
+def _generate_per_frame_advice(
+    user_frame,
+    tpl_frame,
+    action_name: str,
+    global_angle_deviations: dict,
+    core_joint_names: dict,
+    core_joint_indices: list,
+    landmark_names: list,
+):
+    """
+    为帧对比查看器的当前帧生成矫正建议 + 逐帧偏差数据。
+
+    基于用户帧与模板帧的逐关节空间偏差 + 角度偏差，
+    通过 CorrectionRuleEngine 匹配动作专属规则，
+    生成带方向提示（向上/向下/向左/向右）的针对性建议。
+
+    Args:
+        user_frame: 用户 PoseFrame
+        tpl_frame: 模板 PoseFrame
+        action_name: 动作类别（如 "squat"）
+        global_angle_deviations: 全局角度偏差（来自 CorrectionReport，作为 fallback）
+        core_joint_names: 核心关节 {idx: 英文名}
+        core_joint_indices: 核心关节索引列表
+        landmark_names: MediaPipe 33 个 landmark 英文名列表
+
+    Returns:
+        (advice_lines: list, per_frame_deviations: dict)
+        - advice_lines: 建议文本行列表
+        - per_frame_deviations: {英文关节名: 偏差值}，供帧查看器表格使用
+    """
+    from src.correction.angle_utils import AngleCalculator
+
+    # 1. 转换帧为 numpy 数组
+    user_arr = _poseframe_to_array(user_frame)
+    tpl_arr = _poseframe_to_array(tpl_frame)
+
+    # 2. 计算躯干归一化尺度 + 髋中心（用于方向计算）
+    u_torso = _torso_length(user_arr)
+    t_torso = _torso_length(tpl_arr)
+    avg_torso = (u_torso + t_torso) / 2.0
+    if avg_torso < 1e-6:
+        avg_torso = 1.0
+
+    u_hip = np.array([
+        (user_arr[23, 0] + user_arr[24, 0]) / 2.0,
+        (user_arr[23, 1] + user_arr[24, 1]) / 2.0,
+    ])
+    t_hip = np.array([
+        (tpl_arr[23, 0] + tpl_arr[24, 0]) / 2.0,
+        (tpl_arr[23, 1] + tpl_arr[24, 1]) / 2.0,
+    ])
+
+    # 3. 逐核心关节计算空间偏差 + 方向提示
+    per_frame_deviations = {}
+    per_frame_directions = {}
+    for joint_idx in core_joint_indices:
+        if joint_idx >= user_arr.shape[0] or joint_idx >= tpl_arr.shape[0]:
+            continue
+        u_xyz = user_arr[joint_idx, :3]
+        t_xyz = tpl_arr[joint_idx, :3]
+        dist = float(np.sqrt(np.sum((u_xyz - t_xyz) ** 2)))
+        dist = dist / avg_torso  # 躯干尺度归一化
+        en_name = landmark_names[joint_idx] if joint_idx < len(landmark_names) else f"joint_{joint_idx}"
+        per_frame_deviations[en_name] = dist
+
+        # 计算方向：以髋中心为参考，比较归一化后的 2D 位置差
+        u_centered = user_arr[joint_idx, :2] - u_hip
+        t_centered = tpl_arr[joint_idx, :2] - t_hip
+        dx = (t_centered[0] - u_centered[0]) / max(avg_torso, 1e-6)
+        dy = (t_centered[1] - u_centered[1]) / max(avg_torso, 1e-6)
+
+        if abs(dy) > abs(dx) and abs(dy) > 0.008:
+            direction = "向下" if dy > 0 else "向上"
+        elif abs(dx) > 0.008:
+            direction = "向右" if dx > 0 else "向左"
+        else:
+            direction = ""
+        per_frame_directions[en_name] = direction
+
+    # 4. 计算当前帧角度
+    angle_calc = AngleCalculator()
+    user_angles = angle_calc.compute_frame_angles(user_arr)
+    tpl_angles = angle_calc.compute_frame_angles(tpl_arr)
+
+    # 5. 构建角度偏差字典（优先用逐帧计算值，fallback 用全局值）
+    angle_devs = {}
+    for name in set(list(user_angles.keys()) + list(tpl_angles.keys())):
+        ua = user_angles.get(name, float('nan'))
+        ta = tpl_angles.get(name, float('nan'))
+        if not (np.isnan(ua) or np.isnan(ta)):
+            angle_devs[name] = (ua, ta, ua - ta)
+
+    # 如果没有可用的逐帧角度偏差，回退到全局角度偏差
+    if not angle_devs and global_angle_deviations:
+        angle_devs = dict(global_angle_deviations)
+
+    # 6. 用规则引擎匹配动作专属建议
+    if action_name and (per_frame_deviations or angle_devs):
+        engine = _get_viewer_rule_engine()
+        correction_items = engine.match_rules(
+            action=action_name,
+            joint_deviations=per_frame_deviations,
+            angle_deviations=angle_devs if angle_devs else None,
+        )
+    else:
+        correction_items = []
+
+    # 7. 生成建议文本（微小<0.8 不显示，中等0.8~1.3，严重>1.3）
+    advice = []
+    significant_items = [
+        item for item in correction_items
+        if item.priority in ("high", "medium") and item.deviation >= 0.8
+    ]
+    for item in significant_items:
+        sev = "severe" if item.deviation > 1.3 else "medium"
+        icon = {"severe": "🔴", "medium": "🟡"}.get(sev, "⚪")
+        line = f"{icon} **{item.joint_display_name}** — {item.advice}"
+        if item.angle_diff is not None and abs(item.angle_diff) > 1:
+            line += f"（角度差 {abs(item.angle_diff):.0f}°）"
+        elif item.deviation > 0.01:
+            line += f"（偏差 {item.deviation:.3f}）"
+
+        # 对来自兜底规则的通用空间建议，附加方向提示
+        direction = per_frame_directions.get(item.joint_name, "")
+        if direction and "位置" in item.advice:
+            line += f"，请{direction}调整"
+
+        advice.append(line)
+
+    # 8. 兜底：仅中等(≥0.8)和严重(>1.3)偏差输出建议
+    if not advice:
+        sorted_devs = sorted(per_frame_deviations.items(), key=lambda x: x[1], reverse=True)
+        for en_name, dev in sorted_devs:
+            if dev < 0.8:
+                continue
+            level = "严重" if dev > 1.3 else "中等"
+            icon = "🔴" if dev > 1.3 else "🟡"
+            cn = core_joint_names.get(
+                landmark_names.index(en_name) if en_name in landmark_names else -1,
+                en_name,
+            )
+            direction = per_frame_directions.get(en_name, "")
+            if direction:
+                dir_text = f"，请将{cn}{direction}调整"
+            else:
+                dir_text = f"，请注意调整{cn}位置"
+            advice.append(
+                f"{icon} **{cn}**（偏差 {dev:.3f}，{level}）{dir_text}"
+            )
+
+    if not advice:
+        advice.append("✅ 本帧整体吻合，继续保持！")
+
+    return advice, per_frame_deviations
+
+
 class AppPipeline:
     """
     应用层端到端流水线
@@ -677,7 +871,9 @@ class AppPipeline:
             "match_end": match_end,
             "user_fit_box": user_fit_box,
             "template_fit_box": template_fit_box,
+            "action_name": report.action_name,
             "joint_deviations": dict(report.joint_deviations or {}),
+            "angle_deviations": dict(report.angle_deviations or {}),
             "total_user_frames": user_seq.num_frames,
         }
 
@@ -754,12 +950,21 @@ class AppPipeline:
         user_frame = user_seq.frames[uidx]
         tpl_frame = tpl_seq.frames[tidx]
 
-        # 关节偏差排序（用已有 joint_deviations，同步标注红圈）
-        deviations = viewer_state.get("joint_deviations", {})
-        # 英文名 → 索引
+        # === 逐帧偏差计算 + 建议生成（一次计算，表格和建议共用） ===
+        advice, per_frame_devs = _generate_per_frame_advice(
+            user_frame=user_frame,
+            tpl_frame=tpl_frame,
+            action_name=viewer_state.get("action_name", ""),
+            global_angle_deviations=viewer_state.get("angle_deviations", {}),
+            core_joint_names=CORE_JOINT_NAMES,
+            core_joint_indices=CORE_JOINT_INDICES,
+            landmark_names=LANDMARK_NAMES,
+        )
+
+        # 用逐帧偏差构建关节表格（而非全局平均值）
         name_to_idx = {n: i for i, n in enumerate(LANDMARK_NAMES)}
         joint_rows = []
-        for en_name, dev in deviations.items():
+        for en_name, dev in per_frame_devs.items():
             idx = name_to_idx.get(en_name)
             if idx is None:
                 continue
@@ -783,18 +988,6 @@ class AppPipeline:
         )
         import cv2 as _cv2
         img_rgb = _cv2.cvtColor(img_bgr, _cv2.COLOR_BGR2RGB)
-
-        # 针对"本帧"的建议：挑出当前帧偏差大的关节名做提示
-        advice = []
-        for cn, _en, dev, _idx in joint_rows[:3]:
-            if dev < 0.08:
-                continue
-            level = "严重" if dev >= 0.18 else "中等"
-            advice.append(
-                f"• **{cn}**（偏差 {dev:.3f}，{level}）：请将 {cn} 向模板位置靠近。"
-            )
-        if not advice:
-            advice.append("✅ 本帧整体吻合，继续保持！")
 
         step_info = (
             f"用户帧 **{uidx + 1}/{user_total}**  ↔  "
@@ -900,7 +1093,7 @@ class AppPipeline:
                 action_display_name=display_name,
                 quality_score=report.quality_score,
                 similarity=report.similarity,
-                report_text=report.to_text() + f"\n\n【使用算法】{algo_display}",
+                report_text=report.to_text(include_suggestions=False) + f"\n\n【使用算法】{algo_display}",
                 deviation_plot_path=deviation_plot_path,
                 skeleton_video_path=None,
                 comparison_video_path=comparison_video_path,

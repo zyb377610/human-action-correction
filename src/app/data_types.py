@@ -68,8 +68,6 @@ class AnalysisResult:
                 lines.append(f"   └─ 完成度:  {cov:.1%}")
         lines.append(f"📏 折算相似度: {self.similarity:.1%}")
         lines.append(f"📝 矫正建议: {self.num_corrections} 条")
-        if self.confidence is not None:
-            lines.insert(1, f"🎯 识别置信度: {self.confidence:.1%}")
         if self.algorithm_used:
             lines.append(f"🔧 使用算法: {self.algorithm_used}")
         return "\n".join(lines)

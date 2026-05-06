@@ -95,13 +95,13 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         """上传视频分析"""
         # gr.File 可能返回 str 路径，也可能返回 dict（含 name 键）
         if video_file is None:
-            return "⚠️ 请先上传视频文件", None, None, None
+            return "⚠️ 请先上传视频文件", None, None
         if isinstance(video_file, dict):
             video_path = video_file.get("name", "")
         else:
             video_path = str(video_file)
         if not video_path:
-            return "⚠️ 请先上传视频文件", None, None, None
+            return "⚠️ 请先上传视频文件", None, None
 
         action_name = _resolve_action(action_choice)
         algo_id = _resolve_algorithm(algo_label)
@@ -117,7 +117,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             progress_callback=progress_cb,
         )
         session.last_result = result
-        return result.report_text, result.deviation_plot_path, result.summary(), result.comparison_video_path
+        return result.report_text, result.summary(), result.comparison_video_path
 
     def on_start_cam_recording():
         """视频分析 Tab — 摄像头录制：开始"""
@@ -146,7 +146,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             session.finish_analysis()
             return (
                 "⚠️ 录制帧数不足（至少 5 帧），请确保全身在画面中",
-                "", None, None,
+                "", None,
                 gr.update(interactive=True),
                 gr.update(interactive=False),
             )
@@ -168,7 +168,6 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         return (
             "✅ 分析完成",
             result.report_text,
-            result.deviation_plot_path,
             result.comparison_video_path,
             gr.update(interactive=True),
             gr.update(interactive=False),
@@ -297,7 +296,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             session.finish_analysis()
             return (
                 "⚠️ 帧数不足（至少 5 帧），请重试",
-                "", None,
+                "",
                 gr.update(interactive=True),
                 gr.update(interactive=False),
             )
@@ -319,7 +318,6 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         return (
             "✅ 分析完成 — 总体报告已生成",
             result.report_text,
-            result.deviation_plot_path,
             gr.update(interactive=True),
             gr.update(interactive=False),
         )
@@ -496,7 +494,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         """将 [(中文, 英文, 偏差), ...] 渲染为 markdown 表格"""
         lines = ["| 关节 | 英文名 | 偏差 |", "|---|---|---|"]
         for cn, en, dev in rows[:12]:
-            mark = "🔴" if dev >= 0.18 else ("🟡" if dev >= 0.08 else "🟢")
+            mark = "🔴" if dev > 1.3 else ("🟡" if dev >= 0.8 else "🟢")
             lines.append(f"| {mark} {cn} | `{en}` | {dev:.4f} |")
         return "\n".join(lines)
 
@@ -702,9 +700,6 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                         vid_report = gr.Textbox(
                             label="📝 矫正报告", lines=12, interactive=False
                         )
-                        vid_plot = gr.Image(
-                            label="📈 偏差分析图", type="filepath"
-                        )
                         vid_comparison = gr.Video(
                             label="🎬 骨骼对比视频（左：您的动作 🟢🟡🔴 | 右：标准模板）",
                             height=360,
@@ -779,9 +774,6 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                             lines=12,
                             interactive=False,
                         )
-                        cam_rec_plot = gr.Image(
-                            label="📈 偏差分析图", type="filepath"
-                        )
 
             # 模式切换
             def on_switch_input_mode(mode):
@@ -800,7 +792,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             analyze_btn.click(
                 fn=on_analyze_video,
                 inputs=[video_input, vid_action_dropdown, vid_algo_dropdown],
-                outputs=[vid_report, vid_plot, vid_summary, vid_comparison],
+                outputs=[vid_report, vid_summary, vid_comparison],
             ).then(
                 fn=on_frame_viewer_init,
                 outputs=[
@@ -841,7 +833,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 inputs=[vid_action_dropdown, vid_algo_dropdown],
                 outputs=[
                     cam_rec_status,
-                    cam_rec_report, cam_rec_plot, vid_comparison,
+                    cam_rec_report, vid_comparison,
                     cam_rec_start, cam_rec_stop,
                 ],
             ).then(
@@ -931,11 +923,6 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                         lines=12,
                         interactive=False,
                     )
-                with gr.Column():
-                    rt_plot = gr.Image(
-                        label="📈 偏差分析图",
-                        type="filepath",
-                    )
 
             # 实时流处理
             rt_cam_input.stream(
@@ -959,7 +946,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 inputs=[rt_action_dropdown, rt_algo_dropdown],
                 outputs=[
                     rt_status,
-                    rt_report, rt_plot,
+                    rt_report,
                     rt_start_btn, rt_stop_btn,
                 ],
             )

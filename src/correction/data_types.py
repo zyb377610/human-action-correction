@@ -112,9 +112,12 @@ class CorrectionReport:
     _best_template: object = field(default=None, repr=False)
     _comparison_result: object = field(default=None, repr=False)
 
-    def to_text(self) -> str:
+    def to_text(self, include_suggestions: bool = True) -> str:
         """
         格式化为可读的中文文本报告
+
+        Args:
+            include_suggestions: 是否包含矫正建议段落（UI 模式下可关闭）
 
         Returns:
             格式化的报告文本
@@ -172,80 +175,24 @@ class CorrectionReport:
             return "\n".join(lines)
 
         # ========== 矫正建议 ==========
-        if self.corrections:
-            lines.append("-" * 60)
-            lines.append(f"  矫正建议（共 {len(self.corrections)} 条，按优先级排序）")
-            lines.append("-" * 60)
-            for i, item in enumerate(self.corrections, 1):
-                priority_tag = _priority_tag(item.priority)
-                lines.append("")
-                lines.append(
-                    f"  {i}. {priority_tag} {item.joint_display_name} "
-                    f"(偏差 {item.deviation:.4f})"
-                )
-                lines.append(f"     问题: {item.description}")
-                lines.append(f"     建议: {item.advice}")
-                if item.angle_diff is not None:
-                    lines.append(f"     角度偏差: 约 {abs(item.angle_diff):.0f}°")
-        else:
-            lines.append("  ✅ 动作表现良好，无需特别矫正。")
-
-        # ========== 逐关节偏差明细 ==========
-        if self.joint_deviations:
-            lines.append("")
-            lines.append("-" * 60)
-            lines.append("  逐关节偏差明细（按偏差降序）")
-            lines.append("-" * 60)
-            sorted_joints = sorted(
-                self.joint_deviations.items(),
-                key=lambda x: x[1],
-                reverse=True,
-            )
-            for en_name, dev in sorted_joints:
-                cn = self.joint_display_map.get(en_name, en_name)
-                level = _deviation_level(dev)
-                lines.append(
-                    f"  {level}  {cn:<6s} ({en_name:<20s}) "
-                    f"偏差={dev:.4f}"
-                )
-
-        # ========== 关节角度对比 ==========
-        if self.angle_deviations:
-            lines.append("")
-            lines.append("-" * 60)
-            lines.append("  关节角度对比（用户 vs 模板）")
-            lines.append("-" * 60)
-            from src.correction.angle_utils import ANGLE_DISPLAY_NAMES
-            for name, vals in self.angle_deviations.items():
-                if not (isinstance(vals, (tuple, list)) and len(vals) == 3):
-                    continue
-                u, t, d = vals
-                cn = ANGLE_DISPLAY_NAMES.get(name, name)
-                tag = "⚠" if abs(d) >= 10 else " "
-                lines.append(
-                    f"  {tag} {cn:<8s} 用户 {u:6.1f}° | 模板 {t:6.1f}° | 差 {d:+6.1f}°"
-                )
-
-        # ========== 逐帧对齐详情 ==========
-        if self.frame_details:
-            lines.append("")
-            lines.append("-" * 60)
-            lines.append(
-                f"  逐帧对齐明细（共 {len(self.frame_details)} 步，"
-                f"仅列出偏差最大的关节）"
-            )
-            lines.append("-" * 60)
-            lines.append(
-                f"  {'步':>4} | {'用户帧':>6} | {'模板帧':>6} | "
-                f"{'偏差最大关节':<10s} | {'该关节偏差':>10s} | {'总偏差':>8s}"
-            )
-            for step, d in enumerate(self.frame_details, 1):
-                mark = _deviation_level(d.worst_joint_deviation)
-                lines.append(
-                    f"  {step:>4d} | {d.user_frame:>6d} | {d.template_frame:>6d} | "
-                    f"{mark} {d.worst_joint_display:<8s} | "
-                    f"{d.worst_joint_deviation:>10.4f} | {d.total_deviation:>8.4f}"
-                )
+        if include_suggestions:
+            if self.corrections:
+                lines.append("-" * 60)
+                lines.append(f"  矫正建议（共 {len(self.corrections)} 条，按优先级排序）")
+                lines.append("-" * 60)
+                for i, item in enumerate(self.corrections, 1):
+                    priority_tag = _priority_tag(item.priority)
+                    lines.append("")
+                    lines.append(
+                        f"  {i}. {priority_tag} {item.joint_display_name} "
+                        f"(偏差 {item.deviation:.4f})"
+                    )
+                    lines.append(f"     问题: {item.description}")
+                    lines.append(f"     建议: {item.advice}")
+                    if item.angle_diff is not None:
+                        lines.append(f"     角度偏差: 约 {abs(item.angle_diff):.0f}°")
+            else:
+                lines.append("  ✅ 动作表现良好，无需特别矫正。")
 
         lines.append("")
         lines.append("=" * 60)
@@ -295,7 +242,7 @@ class CorrectionReport:
 
 def _severity_cn(severity: str) -> str:
     """偏差严重程度中文"""
-    mapping = {"mild": "轻微", "moderate": "中等", "severe": "严重"}
+    mapping = {"mild": "轻微", "moderate": "中等", "noticeable": "明显", "severe": "严重"}
     return mapping.get(severity, severity)
 
 

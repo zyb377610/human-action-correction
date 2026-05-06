@@ -154,7 +154,7 @@ class FeedbackGenerator:
             quality_score=score,
             similarity=similarity,
             overall_comment=overall_comment,
-            severity=deviation_report.severity,
+            severity=self._score_to_severity(score),
             corrections=corrections,
             joint_deviations=deviation_report.joint_deviations,
             angle_deviations=angle_deviations or {},
@@ -175,6 +175,18 @@ class FeedbackGenerator:
             return QUALITY_COMMENTS["needs_improvement"]
         else:
             return QUALITY_COMMENTS["poor"]
+
+    @staticmethod
+    def _score_to_severity(score: float) -> str:
+        """根据质量评分映射偏差严重程度（替代空间偏差阈值）"""
+        if score >= 85:
+            return "mild"
+        elif score >= 70:
+            return "moderate"
+        elif score >= 50:
+            return "noticeable"
+        else:
+            return "severe"
 
     @staticmethod
     def _sort_corrections(items: List[CorrectionItem]) -> List[CorrectionItem]:
