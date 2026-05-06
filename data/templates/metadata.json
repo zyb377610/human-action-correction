@@ -99,6 +99,36 @@
       "display_name": "test_handUpAndDown",
       "description": "",
       "template_count": 1
+    },
+    "dancing": {
+      "display_name": "dancing",
+      "description": "",
+      "template_count": 1
+    },
+    "dancing1": {
+      "display_name": "dancing1",
+      "description": "",
+      "template_count": 1
+    },
+    "pick3": {
+      "display_name": "pick3",
+      "description": "",
+      "template_count": 2
+    },
+    "pick4": {
+      "display_name": "pick4",
+      "description": "",
+      "template_count": 1
+    },
+    "pick5": {
+      "display_name": "pick5",
+      "description": "",
+      "template_count": 1
+    },
+    "pick6": {
+      "display_name": "pick6",
+      "description": "",
+      "template_count": 1
     }
   }
 }
