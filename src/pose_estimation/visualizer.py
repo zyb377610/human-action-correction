@@ -5,7 +5,9 @@
 只绘制 17 个核心关节点及其连线，去掉面部细节和手指等噪声点。
 """
 
+import logging
 import time
+from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
 import cv2
@@ -15,6 +17,132 @@ from .data_types import (
     PoseFrame, POSE_CONNECTIONS, LANDMARK_NAMES, NUM_LANDMARKS
 )
 from .feature_extractor import get_joint_angles, JOINT_ANGLE_DEFINITIONS
+
+logger = logging.getLogger(__name__)
+
+# ===== 中文字体路径（跨平台） =====
+def _find_chinese_font() -> Optional[str]:
+    """查找可用的中文字体文件路径"""
+    candidates = []
+    # Windows
+    candidates.extend([
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simkai.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+    ])
+    # macOS
+    candidates.extend([
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    ])
+    # Linux
+    candidates.extend([
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    ])
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    return None
+
+_CHINESE_FONT_PATH: Optional[str] = None
+
+def _get_chinese_font(size: int = 14):
+    """获取PIL中文字体对象（懒加载）"""
+    global _CHINESE_FONT_PATH
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        logger.warning("PIL/Pillow 未安装，无法渲染中文标签")
+        return None
+    if _CHINESE_FONT_PATH is None:
+        _CHINESE_FONT_PATH = _find_chinese_font()
+        if _CHINESE_FONT_PATH:
+            logger.info(f"中文字体: {_CHINESE_FONT_PATH}")
+        else:
+            logger.warning("未找到中文字体文件，骨骼标签将无法显示")
+    if _CHINESE_FONT_PATH is None:
+        return None
+    return ImageFont.truetype(_CHINESE_FONT_PATH, size)
+
+
+def put_chinese_text(
+    image: np.ndarray,
+    text: str,
+    position: Tuple[int, int],
+    font_size: int = 14,
+    text_color: Tuple[int, int, int] = (255, 255, 255),
+    bg_color: Optional[Tuple[int, int, int, int]] = (0, 0, 0, 180),
+) -> np.ndarray:
+    """
+    使用 PIL 在 OpenCV 图像上绘制中文文本
+
+    OpenCV 的 cv2.putText 不支持中文字符，此函数通过 PIL 渲染
+    中文后再合并回 OpenCV 格式。
+
+    Args:
+        image: OpenCV BGR 格式图像（会被原地修改）
+        text: 要绘制的文本（支持中文）
+        position: (x, y) 文本左上角起始位置
+        font_size: 字体大小（像素）
+        text_color: 文字颜色 (R, G, B) — 注意是 RGB 顺序
+        bg_color: 背景颜色 (R, G, B, A)，None 表示无背景
+
+    Returns:
+        修改后的图像
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return image
+
+    font = _get_chinese_font(font_size)
+    if font is None:
+        return image
+
+    h, w = image.shape[:2]
+
+    # 创建临时 PIL 图像（RGBA 模式支持透明度）
+    pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    if bg_color is not None:
+        # 用 RGBA 叠加方式画背景和文字
+        overlay_rgba = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay_rgba)
+        # 先画背景
+        bbox = draw.textbbox(position, text, font=font)
+        draw.rectangle(bbox, fill=bg_color)
+        # 再画文字
+        draw.text(position, text, font=font, fill=text_color + (255,))
+        # 合成
+        pil_img = pil_img.convert("RGBA")
+        pil_img = Image.alpha_composite(pil_img, overlay_rgba)
+    else:
+        draw = ImageDraw.Draw(pil_img)
+        draw.text(position, text, font=font, fill=text_color)
+
+    # 转回 OpenCV BGR
+    result = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    image[:] = result[:]
+    return image
+
+
+def get_text_size_chinese(text: str, font_size: int = 14) -> Tuple[int, int]:
+    """获取中文文本的像素尺寸 (width, height)"""
+    font = _get_chinese_font(font_size)
+    if font is None:
+        return (len(text) * font_size, font_size)  # 粗略估计
+    try:
+        from PIL import ImageDraw, Image
+    except ImportError:
+        return (len(text) * font_size, font_size)
+    dummy = Image.new("RGB", (1, 1))
+    draw = ImageDraw.Draw(dummy)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return (bbox[2] - bbox[0], bbox[3] - bbox[1])
 
 
 # ===== 要显示的 17 个核心关节点 =====
@@ -71,6 +199,24 @@ FPS_FONT_THICKNESS = 2
 # 可见度阈值
 VISIBILITY_THRESHOLD = 0.5
 
+# ===== 关节中文名称映射（仅17个核心关节） =====
+JOINT_DISPLAY_NAMES: Dict[int, str] = {
+    0:  "鼻子",
+    11: "左肩", 12: "右肩",
+    13: "左肘", 14: "右肘",
+    15: "左腕", 16: "右腕",
+    23: "左髋", 24: "右髋",
+    25: "左膝", 26: "右膝",
+    27: "左踝", 28: "右踝",
+    29: "左踵", 30: "右踵",
+    31: "左尖", 32: "右尖",
+}
+
+# 标签文字样式（PIL 渲染，font_size 替代 font_scale）
+LABEL_TEXT_COLOR = (255, 255, 255)       # 白色标签文字
+LABEL_BG_COLOR = (0, 0, 0, 180)          # 半透明黑色背景
+LABEL_FONT_SIZE = 12                      # PIL 字体大小（像素）
+
 
 def draw_skeleton(
     image: np.ndarray,
@@ -80,6 +226,8 @@ def draw_skeleton(
     connection_color: Tuple[int, int, int] = DEFAULT_CONNECTION_COLOR,
     connection_thickness: int = DEFAULT_CONNECTION_THICKNESS,
     draw_low_visibility: bool = True,
+    show_labels: bool = True,
+    show_angles: bool = True,
 ) -> np.ndarray:
     """
     在图像上绘制 17 个核心关节的骨骼连接图
@@ -95,6 +243,8 @@ def draw_skeleton(
         connection_color: 连线颜色 (B, G, R)
         connection_thickness: 连线粗细
         draw_low_visibility: 是否绘制低可见度的关键点
+        show_labels: 是否显示关节中文名称标签
+        show_angles: 是否显示关节角度值
 
     Returns:
         绘制后的图像
@@ -141,6 +291,60 @@ def draw_skeleton(
         else:
             cv2.circle(image, pt, LOW_VIS_LANDMARK_RADIUS,
                        LOW_VIS_LANDMARK_COLOR, -1)
+
+    # 3. 绘制关节中文名称标签（使用 PIL 渲染中文）
+    if show_labels:
+        draw_joint_labels(image, frame)
+
+    # 4. 绘制关节角度值
+    if show_angles:
+        draw_angles(image, frame)
+
+    return image
+
+
+def draw_joint_labels(
+    image: np.ndarray,
+    frame: PoseFrame,
+    text_color: Tuple[int, int, int] = LABEL_TEXT_COLOR,
+    font_size: int = LABEL_FONT_SIZE,
+) -> np.ndarray:
+    """
+    在每个可见关节旁边标注中文名称（使用 PIL 渲染，支持中文）
+
+    Args:
+        image: BGR 格式图像（会被修改）
+        frame: 单帧姿态数据
+        text_color: 文字颜色 (R, G, B) — PIL 使用 RGB 顺序
+        font_size: 字体大小（像素）
+
+    Returns:
+        标注后的图像
+    """
+    h, w = image.shape[:2]
+    landmarks = frame.landmarks
+
+    for idx, name in JOINT_DISPLAY_NAMES.items():
+        if idx >= len(landmarks):
+            continue
+        lm = landmarks[idx]
+        if lm.visibility < VISIBILITY_THRESHOLD:
+            continue
+
+        # 标签位置：关键点右下方偏移
+        px = int(lm.x * w)
+        py = int(lm.y * h)
+        label_x = px + 6
+        label_y = py + 4
+
+        # 使用 PIL 渲染中文文本（带半透明黑色背景）
+        put_chinese_text(
+            image, name,
+            position=(label_x, label_y),
+            font_size=font_size,
+            text_color=text_color,
+            bg_color=(0, 0, 0, 160),
+        )
 
     return image
 

@@ -27,7 +27,9 @@ from src.pose_estimation.data_types import (
 from src.pose_estimation.visualizer import (
     DISPLAY_JOINT_INDICES, DISPLAY_CONNECTIONS,
     VISIBILITY_THRESHOLD,
+    put_chinese_text,
 )
+from src.pose_estimation.feature_extractor import get_joint_angles, JOINT_ANGLE_DEFINITIONS
 from src.action_comparison.distance_metrics import CORE_JOINT_INDICES, CORE_JOINT_NAMES
 from .comparison import ComparisonResult
 
@@ -483,8 +485,10 @@ def _draw_skeleton_on_region(
     joint_deviation_map: Optional[Dict[int, Tuple[float, Tuple[int, int, int]]]],
     is_template: bool = False,
     tpl_landmarks: Optional[List[Tuple[float, float, float, float]]] = None,
+    show_labels: bool = True,
+    show_angles: bool = True,
 ):
-    """在画布指定区域绘制骨骼"""
+    """在画布指定区域绘制骨骼（含关节名称标签和角度值）"""
     radius = max(2, int(region_h * _RADIUS_RATIO))
     thickness = max(1, int(region_h * _THICKNESS_RATIO))
 
@@ -543,6 +547,94 @@ def _draw_skeleton_on_region(
                     color = COLOR_GOOD
             cv2.circle(canvas, px[idx], radius, color, -1)
             cv2.circle(canvas, px[idx], radius, COLOR_WHITE, 1)
+
+    # 关节名称标签（PIL 渲染中文）
+    if show_labels:
+        _draw_joint_labels_on_canvas(canvas, px, vis, region_w)
+
+    # 关节角度标注
+    if show_angles:
+        _draw_angles_on_canvas(canvas, px, vis, region_w, pose, tpl_landmarks)
+
+
+def _draw_joint_labels_on_canvas(
+    canvas: np.ndarray,
+    px: Dict[int, Tuple[int, int]],
+    vis: Dict[int, float],
+    region_w: int,
+):
+    """在已绘制的骨骼上添加中文关节名称标签（PIL 渲染）"""
+    font_size = max(10, min(14, int(region_w / 45)))
+    text_color = (220, 220, 220)
+
+    for idx, name in CORE_JOINT_NAMES.items():
+        if idx in px and vis.get(idx, 0) > VISIBILITY_THRESHOLD:
+            x, y = px[idx]
+            label_x = x + 5
+            label_y = y + 3
+
+            put_chinese_text(
+                canvas, name,
+                position=(label_x, label_y),
+                font_size=font_size,
+                text_color=text_color,
+                bg_color=(0, 0, 0, 140),
+            )
+
+
+def _draw_angles_on_canvas(
+    canvas: np.ndarray,
+    px: Dict[int, Tuple[int, int]],
+    vis: Dict[int, float],
+    region_w: int,
+    pose: Optional[PoseFrame],
+    tpl_landmarks: Optional[List[Tuple[float, float, float, float]]],
+):
+    """在骨骼顶点旁标注关节角度值（黄色数字，°）"""
+    font_size = max(9, min(12, int(region_w / 55)))
+
+    # 构建角度计算所需的 landmarks
+    angles = {}
+    if pose is not None:
+        angles = get_joint_angles(pose)
+    elif tpl_landmarks is not None:
+        # 从 tpl_landmarks 构造临时 PoseFrame 来计算角度
+        from src.pose_estimation.data_types import PoseLandmark, PoseFrame as PF
+        lms = [
+            PoseLandmark(
+                x=tpl_landmarks[j][0] if j < len(tpl_landmarks) else 0,
+                y=tpl_landmarks[j][1] if j < len(tpl_landmarks) else 0,
+                z=tpl_landmarks[j][2] if j < len(tpl_landmarks) else 0,
+                visibility=tpl_landmarks[j][3] if j < len(tpl_landmarks) else 0,
+            )
+            for j in range(33)
+        ]
+        tmp_frame = PF(timestamp=0, frame_index=0, landmarks=lms)
+        angles = get_joint_angles(tmp_frame)
+
+    if not angles:
+        return
+
+    for name, angle_value in angles.items():
+        if angle_value is None or (isinstance(angle_value, float) and (angle_value != angle_value)):
+            continue
+        # 获取顶点索引
+        _, mid_idx, _ = JOINT_ANGLE_DEFINITIONS[name]
+        if mid_idx not in px or vis.get(mid_idx, 0) < VISIBILITY_THRESHOLD:
+            continue
+
+        x, y = px[mid_idx]
+        text_x = x + 5
+        text_y = y - 10
+
+        angle_text = f"{angle_value:.0f}"
+        put_chinese_text(
+            canvas, angle_text,
+            position=(text_x, text_y),
+            font_size=font_size,
+            text_color=(0, 255, 255),
+            bg_color=(0, 0, 0, 140),
+        )
 
 
 def _draw_info_bar(
