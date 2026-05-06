@@ -18,7 +18,7 @@ from src.data.preprocessing import (
 )
 from src.data.template_library import TemplateLibrary
 
-from .distance_metrics import sequence_to_feature_matrix, sequence_to_hybrid_matrix
+from .distance_metrics import sequence_to_feature_matrix, sequence_to_hybrid_matrix, compute_valid_joints
 from .dtw_algorithms import compute_dtw
 
 logger = logging.getLogger(__name__)
@@ -167,19 +167,38 @@ class ActionComparator:
             query = preprocess_pipeline(query, target_frames=q_target)
             template = preprocess_pipeline(template, target_frames=t_target)
 
+        # ======== 模板权威性：确定有效角度集 ========
+        # 基于模板序列的可见度，筛选出模板中确实可见的关节所对应的角度。
+        # 模板中不可见的身体部位（如只录了上半身），其角度不参与 DTW 评分，
+        # 避免不可见关节的噪声坐标污染特征矩阵（维度稀释根因修复）。
+        # 策略：先通过 compute_valid_joints 确定有效关节集，
+        #       再以"角度顶点（中间关节点）是否有效"判定角度有效性。
+        from src.correction.angle_utils import compute_valid_angles, ANGLE_DEFINITIONS
+        valid_joints = compute_valid_joints(template)
+        valid_angle_names = compute_valid_angles(
+            template, valid_joint_indices=valid_joints
+        )
+        n_valid = len(valid_angle_names)
+        n_total = len(ANGLE_DEFINITIONS)
+        logger.debug(
+            f"有效角度: {n_valid}/{n_total} = {valid_angle_names}"
+        )
+
         # 转换为特征矩阵（带身体比例归一化）
         if self._metric == "hybrid":
             # 混合特征：坐标 + 角度融合
-            q_matrix = sequence_to_hybrid_matrix(query)
-            t_matrix = sequence_to_hybrid_matrix(template)
+            q_matrix = sequence_to_hybrid_matrix(query, valid_angle_names=valid_angle_names)
+            t_matrix = sequence_to_hybrid_matrix(template, valid_angle_names=valid_angle_names)
             # DTW 底层仍用 euclidean（混合矩阵已融合坐标+角度）
             dtw_metric = "euclidean"
         else:
             q_matrix = sequence_to_feature_matrix(
-                query, normalize_body_scale=True
+                query, normalize_body_scale=True,
+                valid_angle_names=valid_angle_names,
             )
             t_matrix = sequence_to_feature_matrix(
-                template, normalize_body_scale=True
+                template, normalize_body_scale=True,
+                valid_angle_names=valid_angle_names,
             )
             dtw_metric = self._metric
 
@@ -196,7 +215,11 @@ class ActionComparator:
         path_length = len(path)
         normalized_dist = distance / path_length if path_length > 0 else distance
 
-        sigma = self._similarity_sigma
+        # 自适应 sigma：有效角度越少，sigma 按比例线性缩减。
+        # 原因：特征维度越低，相同相对差异产生的 L2 距离越小，
+        # 需要用更小的 sigma 保持同等的区分度。
+        # 线性缩放比 sqrt 更激进：n_valid=4/9 → σ_eff ≈ 0.22 (base=0.5)
+        sigma = self._similarity_sigma * (n_valid / max(n_total, 1))
         raw_similarity = np.exp(-(normalized_dist ** 2) / (2 * sigma ** 2))
         raw_similarity = float(np.clip(raw_similarity, 0.0, 1.0))
 

@@ -4,7 +4,7 @@
 支持欧氏距离、余弦距离、曼哈顿距离，提供统一接口。
 """
 
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -213,6 +213,7 @@ def sequence_to_feature_matrix(
     joint_indices: Optional[Sequence[int]] = None,
     normalize_body_scale: bool = True,
     center_normalize: bool = True,
+    valid_angle_names: Optional[List[str]] = None,
 ) -> np.ndarray:
     """
     将 PoseSequence 转换为角度特征矩阵
@@ -225,23 +226,39 @@ def sequence_to_feature_matrix(
         joint_indices: （保留接口兼容，内部不使用）
         normalize_body_scale: （保留接口兼容）
         center_normalize: （保留接口兼容）
+        valid_angle_names: 有效角度名称列表，None 使用全部定义角度。
+                          传入后仅提取列表中包含的角度维度，
+                          实现"模板权威性"原则：模板不可见的身体部位不参与评分。
 
     Returns:
-        (T, num_angles) ndarray，每个元素是角度值 / 180（归一化到 [0,1]）
+        (T, n_angles) ndarray，每个元素是角度值 / 180（归一化到 [0,1]）
     """
     from src.correction.angle_utils import AngleCalculator, ANGLE_DEFINITIONS
 
-    calc = AngleCalculator()
-    T = sequence.num_frames
-    angle_names = list(ANGLE_DEFINITIONS.keys())
+    # 确定要使用的角度名称
+    if valid_angle_names is not None:
+        angle_names = [n for n in valid_angle_names if n in ANGLE_DEFINITIONS]
+        if not angle_names:
+            # 全部被过滤，回退到全部角度（防御性）
+            angle_names = list(ANGLE_DEFINITIONS.keys())
+    else:
+        angle_names = list(ANGLE_DEFINITIONS.keys())
+
     n_angles = len(angle_names)
+    calc = AngleCalculator(valid_angle_names=angle_names)
+    T = sequence.num_frames
     matrix = np.zeros((T, n_angles), dtype=np.float64)
 
     arr = sequence.to_numpy()  # (T, 33, 4)
     for t in range(T):
         angles = calc.compute_frame_angles(arr[t])
         for k, name in enumerate(angle_names):
-            matrix[t, k] = angles[name] / 180.0  # 归一化到 [0,1]
+            val = angles.get(name, float('nan'))
+            # NaN 角度（不可见关节）→ 填入 0.5（中立值，最小化对距离的影响）
+            if np.isnan(val):
+                matrix[t, k] = 0.5
+            else:
+                matrix[t, k] = val / 180.0  # 归一化到 [0,1]
 
     return matrix
 
@@ -523,6 +540,7 @@ def sequence_to_hybrid_matrix(
     joint_indices: Optional[Sequence[int]] = None,
     alpha: float = 0.6,
     beta: float = 0.4,
+    valid_angle_names: Optional[List[str]] = None,
 ) -> np.ndarray:
     """
     融合坐标特征与角度特征的混合矩阵（用于 DTW 比对）
@@ -542,6 +560,7 @@ def sequence_to_hybrid_matrix(
         joint_indices: 关节索引列表，None 使用 CORE_JOINT_INDICES
         alpha: 坐标特征权重（推荐 0.5~0.7）
         beta: 角度特征权重（推荐 0.3~0.5）
+        valid_angle_names: 有效角度名称列表，None 使用全部定义角度
 
     Returns:
         (T, J*3 + n_angles) ndarray，混合特征矩阵
@@ -551,8 +570,10 @@ def sequence_to_hybrid_matrix(
         sequence, joint_indices=joint_indices, normalize=True
     )  # (T, J*3)
 
-    # 角度特征
-    angle = sequence_to_feature_matrix(sequence)  # (T, n_angles)
+    # 角度特征（仅有效角度）
+    angle = sequence_to_feature_matrix(
+        sequence, valid_angle_names=valid_angle_names
+    )  # (T, n_angles)
 
     # 各自按行 L2 归一化，消除量级差异
     coord_norm = np.linalg.norm(coord, axis=1, keepdims=True)

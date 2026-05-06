@@ -35,28 +35,42 @@ from src.pose_estimation.data_types import LANDMARK_NAMES
 logger = logging.getLogger(__name__)
 
 
-def _window_to_angle_matrix(window: np.ndarray) -> np.ndarray:
+def _window_to_angle_matrix(
+    window: np.ndarray,
+    valid_angle_names: Optional[List[str]] = None,
+) -> np.ndarray:
     """
     将关键点窗口转换为角度特征矩阵
 
     Args:
         window: (T, 33, 4) 关键点窗口
+        valid_angle_names: 有效角度名称列表，None 使用全部定义角度
 
     Returns:
         (T, num_angles) 角度特征矩阵，值归一化到 [0,1]
     """
     from src.correction.angle_utils import AngleCalculator, ANGLE_DEFINITIONS
 
-    calc = AngleCalculator()
+    if valid_angle_names is not None:
+        angle_names = [n for n in valid_angle_names if n in ANGLE_DEFINITIONS]
+        if not angle_names:
+            angle_names = list(ANGLE_DEFINITIONS.keys())
+    else:
+        angle_names = list(ANGLE_DEFINITIONS.keys())
+
+    calc = AngleCalculator(valid_angle_names=angle_names)
     T = window.shape[0]
-    angle_names = list(ANGLE_DEFINITIONS.keys())
     n_angles = len(angle_names)
     result = np.zeros((T, n_angles), dtype=np.float64)
 
     for t in range(T):
         angles = calc.compute_frame_angles(window[t])
         for k, name in enumerate(angle_names):
-            result[t, k] = angles[name] / 180.0
+            val = angles.get(name, float('nan'))
+            if np.isnan(val):
+                result[t, k] = 0.5  # 中立值
+            else:
+                result[t, k] = val / 180.0
 
     return result
 
@@ -255,11 +269,21 @@ class RealtimeFeedbackEngine:
         self._spatial_threshold = spatial_threshold
         self._dedup_interval = dedup_interval
 
+        # 模板权威性：确定有效角度集
+        from src.correction.angle_utils import compute_valid_angles, ANGLE_DEFINITIONS
+        self._valid_angle_names = compute_valid_angles(template_sequence)
+        logger.debug(
+            f"RealtimeFeedbackEngine 有效角度: "
+            f"{len(self._valid_angle_names)}/{len(ANGLE_DEFINITIONS)}"
+        )
+
         # 帧缓冲区
         self._frame_buffer: deque = deque(maxlen=window_size)
 
         # 角度计算器
-        self._angle_calc = AngleCalculator()
+        self._angle_calc = AngleCalculator(
+            valid_angle_names=self._valid_angle_names
+        )
 
         # 建议去重缓存 {advice_key: last_shown_timestamp}
         self._dedup_cache: Dict[str, float] = {}
@@ -530,8 +554,12 @@ class RealtimeFeedbackEngine:
             return 0.0, [], user_window, template_window
 
         # 转换为特征矩阵 — 使用角度特征（位置无关）
-        user_feat = _window_to_angle_matrix(user_window)
-        tmpl_feat = _window_to_angle_matrix(template_window)
+        user_feat = _window_to_angle_matrix(
+            user_window, valid_angle_names=self._valid_angle_names
+        )
+        tmpl_feat = _window_to_angle_matrix(
+            template_window, valid_angle_names=self._valid_angle_names
+        )
 
         try:
             distance, path, _ = compute_dtw(

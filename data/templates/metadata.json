@@ -134,6 +134,26 @@
       "display_name": "test_template_text",
       "description": "",
       "template_count": 1
+    },
+    "test_static_1": {
+      "display_name": "test_static_1",
+      "description": "",
+      "template_count": 1
+    },
+    "test_shake1": {
+      "display_name": "test_shake1",
+      "description": "",
+      "template_count": 1
+    },
+    "test_shake2": {
+      "display_name": "test_shake2",
+      "description": "",
+      "template_count": 1
+    },
+    "test_shake3": {
+      "display_name": "test_shake3",
+      "description": "",
+      "template_count": 1
     }
   }
 }
