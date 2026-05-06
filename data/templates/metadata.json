@@ -129,6 +129,11 @@
       "display_name": "pick6",
       "description": "",
       "template_count": 1
+    },
+    "test_template_text": {
+      "display_name": "test_template_text",
+      "description": "",
+      "template_count": 1
     }
   }
 }

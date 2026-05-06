@@ -182,6 +182,8 @@ def render_template_demo_video(
                 joint_deviation_map=None,
                 is_template=True,
                 tpl_landmarks=tpl_lm,
+                show_labels=True,
+                show_angles=True,
             )
             if title:
                 cv2.putText(canvas, title, (10, 24),
@@ -244,6 +246,8 @@ def render_pair_frame(
             canvas, fitted_user, 0, 0, width, height,
             joint_deviation_map=None,
             is_template=False,
+            show_labels=True,
+            show_angles=True,
         )
 
     # 右：模板骨骼（灰色）
@@ -255,6 +259,8 @@ def render_pair_frame(
             joint_deviation_map=None,
             is_template=True,
             tpl_landmarks=tpl_lm,
+            show_labels=True,
+            show_angles=True,
         )
 
     # 在左侧画红圈高亮偏差大的关节（使用缩放后的坐标）
