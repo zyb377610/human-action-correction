@@ -34,8 +34,13 @@ pose_estimation:
 # -------------------------
 comparison:
   dtw_method: dtw_python                 # DTW 算法: dtw_python / fastdtw / scipy
-  distance_metric: euclidean             # 距离度量: euclidean / cosine / manhattan
+  distance_metric: euclidean             # 距离度量: euclidean / cosine / manhattan / weighted_euclidean / hybrid
   deviation_threshold: 0.1               # 偏差阈值
+
+  # === 加权距离配置（distance_metric=weighted_euclidean 时生效） ===
+  axis_weights: [1.0, 1.0, 0.35]        # x, y, z 轴权重（z 轴降权因 MediaPipe 深度噪声）
+  use_weighted_distance: true            # 偏差分析器默认启用加权距离
+  temporal_smoothness_enabled: true      # 偏差报告中计算时域波动率
 
 # -------------------------
 # 矫正反馈配置

@@ -4,7 +4,7 @@
 支持欧氏距离、余弦距离、曼哈顿距离，提供统一接口。
 """
 
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -47,6 +47,38 @@ CORE_JOINT_NAMES = {
     31: "左脚尖", 32: "右脚尖",
 }
 
+# ===== 轴权重：z 轴降权（MediaPipe 深度估计噪声约为 xy 的 3 倍） =====
+# 在加权欧氏距离中，xyz 各分量先乘该权重再求 L2 范数。
+AXIS_WEIGHTS = np.array([1.0, 1.0, 0.35], dtype=np.float64)
+
+# ===== 关节重要性权重 =====
+# 核心躯干关节（肩、髋）偏差对动作质量影响更大 → 权重 > 1.0
+# 末端关节（腕、踝、脚跟、脚尖）自然活动范围大 → 权重 < 1.0
+# 基于 CORE_JOINT_INDICES 中的 MediaPipe 索引（0/11-16/23-32）
+JOINT_IMPORTANCE_WEIGHTS = {
+    # 躯干核心关节
+    11: 1.2,  # left_shoulder
+    12: 1.2,  # right_shoulder
+    23: 1.2,  # left_hip
+    24: 1.2,  # right_hip
+    # 头部参考
+    0:  1.0,  # nose
+    # 中大关节
+    13: 1.0,  # left_elbow
+    14: 1.0,  # right_elbow
+    25: 1.0,  # left_knee
+    26: 1.0,  # right_knee
+    # 末端关节
+    15: 0.7,  # left_wrist
+    16: 0.7,  # right_wrist
+    27: 0.7,  # left_ankle
+    28: 0.7,  # right_ankle
+    29: 0.6,  # left_heel
+    30: 0.6,  # right_heel
+    31: 0.6,  # left_foot_index
+    32: 0.6,  # right_foot_index
+}
+
 
 def euclidean_distance(a: np.ndarray, b: np.ndarray) -> float:
     """欧氏距离"""
@@ -72,12 +104,89 @@ def manhattan_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.sum(np.abs(a - b)))
 
 
+def weighted_euclidean_distance(
+    a: np.ndarray,
+    b: np.ndarray,
+    joint_indices: Optional[Sequence[int]] = None,
+    k: int = 0,
+    visibility: float = 1.0,
+) -> float:
+    """
+    加权欧氏距离
+
+    对标准欧氏距离做三层加权：
+    1. 轴加权：z 轴噪声大，乘 AXIS_WEIGHTS[2]=0.35 降权
+    2. 关节重要性加权：核心关节(肩/髋)1.2×，末端关节(腕/踝)0.7×
+    3. 可见度加权：低可见度关节放大偏差（1/visibility），避免遮挡关节被忽略
+
+    Args:
+        a, b: 两个 (D,) 向量（可以是整帧拼接向量或单关节 xyz）
+        joint_indices: 关节索引列表，用于查询关节重要性权重
+        k: 当前关节在 joint_indices 中的序号（0-based）
+        visibility: 该关节的可见度 [0, 1]
+
+    Returns:
+        加权欧氏距离
+    """
+    # 轴加权：对 xyz 分量分别乘权重
+    diff = (a - b) * AXIS_WEIGHTS
+    raw = float(np.sqrt(np.sum(diff ** 2)))
+
+    # 关节重要性加权
+    jw = 1.0
+    if joint_indices is not None and k < len(joint_indices):
+        joint_id = joint_indices[k]
+        jw = JOINT_IMPORTANCE_WEIGHTS.get(joint_id, 1.0)
+
+    # 可见度加权：visibility ∈ [0,1]，低可见度 → 放大偏差
+    visibility = float(np.clip(visibility, 0.15, 1.0))
+    vw = 1.0 / visibility
+
+    return raw * jw * vw
+
+
+def weighted_euclidean_frame(
+    a: np.ndarray,
+    b: np.ndarray,
+    joint_indices: Sequence[int],
+    visibilities: Optional[np.ndarray] = None,
+) -> float:
+    """
+    整帧级别的加权欧氏距离（用于 DTW 比对）
+
+    将 (J*3,) 的拼接向量按关节拆分，逐关节计算加权距离后求和。
+
+    Args:
+        a, b: (J*3,) 拼接关节坐标向量
+        joint_indices: 关节索引列表
+        visibilities: (J,) 各关节可见度，None 则全部视为 1.0
+
+    Returns:
+        整帧加权欧氏距离
+    """
+    joint_indices = list(joint_indices)
+    J = len(joint_indices)
+    total = 0.0
+    for k in range(J):
+        start = k * 3
+        vis = float(visibilities[k]) if visibilities is not None else 1.0
+        total += weighted_euclidean_distance(
+            a[start:start + 3],
+            b[start:start + 3],
+            joint_indices=joint_indices,
+            k=k,
+            visibility=vis,
+        )
+    return total
+
+
 # ===== 统一接口 =====
 
 _METRICS = {
     "euclidean": euclidean_distance,
     "cosine": cosine_distance,
     "manhattan": manhattan_distance,
+    "weighted_euclidean": weighted_euclidean_distance,
 }
 
 
@@ -86,7 +195,7 @@ def get_distance_func(name: str) -> Callable:
     获取距离度量函数
 
     Args:
-        name: 度量名称 — "euclidean" / "cosine" / "manhattan"
+        name: 度量名称 — "euclidean" / "cosine" / "manhattan" / "weighted_euclidean"
 
     Returns:
         距离函数 (a, b) -> float
@@ -342,3 +451,119 @@ def sequence_to_landmark_matrix_masked(
                 matrix[t, k * 3 + 2] = dz
 
     return matrix
+
+
+def sequence_to_landmark_matrix_weighted(
+    sequence,
+    joint_indices: Optional[Sequence[int]] = None,
+    align_shoulder: bool = True,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    增强版坐标矩阵提取（同时返回可见度矩阵）
+
+    与 sequence_to_landmark_matrix_masked 相同的归一化逻辑，
+    但额外返回 (T, J) 的可见度矩阵，供后续加权距离计算使用。
+
+    Args:
+        sequence: PoseSequence
+        joint_indices: 关节索引列表，None 使用 CORE_JOINT_INDICES
+        align_shoulder: 是否按肩轴对齐
+
+    Returns:
+        (coord_matrix, vis_matrix)
+        - coord_matrix: (T, J*3) ndarray，归一化后的关节坐标
+        - vis_matrix: (T, J) ndarray，各关节在各帧的可见度
+    """
+    if joint_indices is None:
+        joint_indices = CORE_JOINT_INDICES
+    joint_indices = list(joint_indices)
+    J = len(joint_indices)
+
+    arr = sequence.to_numpy()  # (T, 33, 4)
+    T = arr.shape[0]
+    coord = np.zeros((T, J * 3), dtype=np.float64)
+    vis_mat = np.ones((T, J), dtype=np.float64)
+
+    for t in range(T):
+        lm = arr[t]
+        if lm.shape[0] > 24:
+            cx = (lm[23, 0] + lm[24, 0]) / 2.0
+            cy = (lm[23, 1] + lm[24, 1]) / 2.0
+            cz = (lm[23, 2] + lm[24, 2]) / 2.0
+            sx = (lm[11, 0] + lm[12, 0]) / 2.0
+            sy = (lm[11, 1] + lm[12, 1]) / 2.0
+            sz = (lm[11, 2] + lm[12, 2]) / 2.0
+            torso = np.sqrt(
+                (sx - cx) ** 2 + (sy - cy) ** 2 + (sz - cz) ** 2
+            )
+            if torso < 1e-3:
+                torso = 1.0
+        else:
+            cx = cy = cz = 0.0
+            torso = 1.0
+
+        R = _rotation_from_shoulder_axis(lm) if align_shoulder else np.eye(2)
+
+        for k, j in enumerate(joint_indices):
+            if j < lm.shape[0]:
+                dx = (lm[j, 0] - cx) / torso
+                dy = (lm[j, 1] - cy) / torso
+                dz = (lm[j, 2] - cz) / torso
+                xy = R @ np.array([dx, dy])
+                coord[t, k * 3 + 0] = xy[0]
+                coord[t, k * 3 + 1] = xy[1]
+                coord[t, k * 3 + 2] = dz
+                vis_mat[t, k] = float(lm[j, 3])
+
+    return coord, vis_mat
+
+
+def sequence_to_hybrid_matrix(
+    sequence,
+    joint_indices: Optional[Sequence[int]] = None,
+    alpha: float = 0.6,
+    beta: float = 0.4,
+) -> np.ndarray:
+    """
+    融合坐标特征与角度特征的混合矩阵（用于 DTW 比对）
+
+    坐标部分：
+    - 髋中心平移 + 躯干尺度归一化 + 肩轴对齐 → (T, J*3)
+    - 各关节 L2 归一化（行内），保证与角度特征量级一致
+
+    角度部分：
+    - 关节角度 / 180 → (T, n_angles)
+    - L2 归一化
+
+    拼接后乘权重系数 alpha/beta，得到最终特征矩阵。
+
+    Args:
+        sequence: PoseSequence
+        joint_indices: 关节索引列表，None 使用 CORE_JOINT_INDICES
+        alpha: 坐标特征权重（推荐 0.5~0.7）
+        beta: 角度特征权重（推荐 0.3~0.5）
+
+    Returns:
+        (T, J*3 + n_angles) ndarray，混合特征矩阵
+    """
+    # 坐标特征（已归一化）
+    coord = sequence_to_landmark_matrix(
+        sequence, joint_indices=joint_indices, normalize=True
+    )  # (T, J*3)
+
+    # 角度特征
+    angle = sequence_to_feature_matrix(sequence)  # (T, n_angles)
+
+    # 各自按行 L2 归一化，消除量级差异
+    coord_norm = np.linalg.norm(coord, axis=1, keepdims=True)
+    coord_norm = np.where(coord_norm < 1e-8, 1.0, coord_norm)
+    coord = coord / coord_norm
+
+    angle_norm = np.linalg.norm(angle, axis=1, keepdims=True)
+    angle_norm = np.where(angle_norm < 1e-8, 1.0, angle_norm)
+    angle = angle / angle_norm
+
+    return np.concatenate([
+        coord * alpha,
+        angle * beta,
+    ], axis=1)

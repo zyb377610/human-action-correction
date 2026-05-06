@@ -21,6 +21,8 @@ from src.pose_estimation.data_types import PoseSequence, LANDMARK_NAMES
 from .distance_metrics import (
     sequence_to_landmark_matrix,
     sequence_to_landmark_matrix_masked,
+    sequence_to_landmark_matrix_weighted,
+    weighted_euclidean_distance,
     compute_valid_joints,
     CORE_JOINT_INDICES,
     CORE_JOINT_NAMES,
@@ -62,6 +64,8 @@ class DeviationReport:
     frame_details: List[FrameDeviationDetail] = field(default_factory=list)  # 每步对齐详情
     valid_joint_indices: List[int] = field(default_factory=list)    # 模板确定的有效关节索引
     excluded_joint_names: List[str] = field(default_factory=list)   # 因模板不可见而被剔除的关节中文名
+    temporal_volatility: float = 0.0         # 时域波动率（帧间偏差变化率的均值），0 表示完全稳定
+    use_weighted: bool = False               # 是否使用了加权距离
 
     def summary(self) -> str:
         """生成偏差摘要文本"""
@@ -69,8 +73,13 @@ class DeviationReport:
         lines = [
             f"偏差程度: {severity_cn.get(self.severity, self.severity)}",
             f"整体平均偏差: {self.overall_deviation:.4f}",
-            f"偏差最大关节:",
         ]
+        if self.temporal_volatility > 0:
+            stability = "稳定" if self.temporal_volatility < 0.05 else (
+                "略有波动" if self.temporal_volatility < 0.12 else "波动较大"
+            )
+            lines.append(f"动作稳定性: {stability} (波动率={self.temporal_volatility:.4f})")
+        lines.append(f"偏差最大关节:")
         for detail in self.worst_joint_details:
             lines.append(
                 f"  - {detail['display_name']} ({detail['name']}): "
@@ -89,12 +98,14 @@ class JointDeviationAnalyzer:
         print(report.summary())
     """
 
-    def __init__(self, top_k: int = 5):
+    def __init__(self, top_k: int = 5, use_weighted: bool = True):
         """
         Args:
             top_k: 输出偏差最大的前 K 个关节
+            use_weighted: 是否使用加权欧氏距离（轴加权 + 关节重要性 + 可见度）
         """
         self._top_k = top_k
+        self._use_weighted = use_weighted
 
     def analyze(
         self,
@@ -130,13 +141,25 @@ class JointDeviationAnalyzer:
         ]
 
         # 使用增强版坐标矩阵：髋中心归一化 + 躯干尺度归一化 + 肩轴 2D 旋转对齐
-        # 这同时解决了"拍摄角度不同"和"身高体型差异"的影响。
-        q_matrix = sequence_to_landmark_matrix_masked(
-            q_seq, valid_joints, align_shoulder=True
-        )  # (N, J*3)
-        t_matrix = sequence_to_landmark_matrix_masked(
-            t_seq, valid_joints, align_shoulder=True
-        )  # (M, J*3)
+        if self._use_weighted:
+            # 加权模式：同时提取坐标和可见度矩阵
+            q_matrix, q_vis = sequence_to_landmark_matrix_weighted(
+                q_seq, valid_joints, align_shoulder=True
+            )  # (N, J*3), (N, J)
+            t_matrix, t_vis = sequence_to_landmark_matrix_weighted(
+                t_seq, valid_joints, align_shoulder=True
+            )  # (M, J*3), (M, J)
+        else:
+            # 原始模式（向后兼容）
+            q_matrix = sequence_to_landmark_matrix_masked(
+                q_seq, valid_joints, align_shoulder=True
+            )  # (N, J*3)
+            t_matrix = sequence_to_landmark_matrix_masked(
+                t_seq, valid_joints, align_shoulder=True
+            )  # (M, J*3)
+            q_vis = None
+            t_vis = None
+
         path = result.path
 
         joint_indices = list(valid_joints)
@@ -148,7 +171,7 @@ class JointDeviationAnalyzer:
 
         joint_diffs = np.zeros((len(path), num_joints), dtype=np.float64)
 
-        # 沿对齐路径，对每一步计算每个核心关节的欧氏距离
+        # 沿对齐路径，对每一步计算每个核心关节的偏差
         for step, (i, j) in enumerate(path):
             # 防御越界
             i = min(i, q_matrix.shape[0] - 1)
@@ -156,9 +179,20 @@ class JointDeviationAnalyzer:
             for k in range(num_joints):
                 q_xyz = q_matrix[i, k * 3: k * 3 + 3]
                 t_xyz = t_matrix[j, k * 3: k * 3 + 3]
-                joint_diffs[step, k] = float(
-                    np.sqrt(np.sum((q_xyz - t_xyz) ** 2))
-                )
+
+                if self._use_weighted:
+                    # 加权欧氏距离：轴加权 + 关节重要性 + 可见度
+                    vis = float(q_vis[i, k]) if q_vis is not None else 1.0
+                    joint_diffs[step, k] = weighted_euclidean_distance(
+                        q_xyz, t_xyz,
+                        joint_indices=joint_indices,
+                        k=k,
+                        visibility=vis,
+                    )
+                else:
+                    joint_diffs[step, k] = float(
+                        np.sqrt(np.sum((q_xyz - t_xyz) ** 2))
+                    )
 
         # 每个关节的平均偏差
         joint_mean = np.mean(joint_diffs, axis=0)  # (num_joints,)
@@ -204,6 +238,14 @@ class JointDeviationAnalyzer:
         # 整体平均偏差
         overall_deviation = float(np.mean(joint_mean))
 
+        # === 时域波动率 ===
+        # 沿路径偏差的一阶差分均值，衡量动作稳定性
+        temporal_volatility = 0.0
+        if len(frame_deviations) >= 2:
+            temporal_volatility = float(
+                np.mean(np.abs(np.diff(frame_deviations)))
+            )
+
         # 严重程度分级
         severity = self._classify_severity(overall_deviation)
 
@@ -234,6 +276,8 @@ class JointDeviationAnalyzer:
             frame_details=frame_details,
             valid_joint_indices=list(joint_indices),
             excluded_joint_names=excluded,
+            temporal_volatility=temporal_volatility,
+            use_weighted=self._use_weighted,
         )
 
     @staticmethod

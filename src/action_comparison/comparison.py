@@ -18,7 +18,7 @@ from src.data.preprocessing import (
 )
 from src.data.template_library import TemplateLibrary
 
-from .distance_metrics import sequence_to_feature_matrix
+from .distance_metrics import sequence_to_feature_matrix, sequence_to_hybrid_matrix
 from .dtw_algorithms import compute_dtw
 
 logger = logging.getLogger(__name__)
@@ -168,18 +168,26 @@ class ActionComparator:
             template = preprocess_pipeline(template, target_frames=t_target)
 
         # 转换为特征矩阵（带身体比例归一化）
-        q_matrix = sequence_to_feature_matrix(
-            query, normalize_body_scale=True
-        )
-        t_matrix = sequence_to_feature_matrix(
-            template, normalize_body_scale=True
-        )
+        if self._metric == "hybrid":
+            # 混合特征：坐标 + 角度融合
+            q_matrix = sequence_to_hybrid_matrix(query)
+            t_matrix = sequence_to_hybrid_matrix(template)
+            # DTW 底层仍用 euclidean（混合矩阵已融合坐标+角度）
+            dtw_metric = "euclidean"
+        else:
+            q_matrix = sequence_to_feature_matrix(
+                query, normalize_body_scale=True
+            )
+            t_matrix = sequence_to_feature_matrix(
+                template, normalize_body_scale=True
+            )
+            dtw_metric = self._metric
 
         # DTW 计算（子序列模式：自动双向适配长短不一的序列）
         distance, path, cost_matrix = compute_dtw(
             q_matrix, t_matrix,
             algorithm=self._algorithm,
-            metric=self._metric,
+            metric=dtw_metric,
             window_size=self._window_size,
             use_subsequence=True,
         )

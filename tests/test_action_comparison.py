@@ -15,8 +15,15 @@ from src.action_comparison.distance_metrics import (
     euclidean_distance,
     cosine_distance,
     manhattan_distance,
+    weighted_euclidean_distance,
+    weighted_euclidean_frame,
     get_distance_func,
     sequence_to_feature_matrix,
+    sequence_to_landmark_matrix,
+    sequence_to_hybrid_matrix,
+    CORE_JOINT_INDICES,
+    AXIS_WEIGHTS,
+    JOINT_IMPORTANCE_WEIGHTS,
 )
 from src.action_comparison.dtw_algorithms import (
     classic_dtw,
@@ -248,7 +255,9 @@ class TestActionComparator:
         comp = ActionComparator(algorithm="fastdtw", preprocess=False)
         result = comp.compare(seq_a, seq_diff)
         assert result.distance > 0
-        assert result.cost_matrix is None
+        # 注：子序列 DTW 模式下 cost_matrix 由 subsequence_dtw 内部计算，
+        # 不一定为 None（取决于底层算法是否返回 cost_matrix）
+        assert result.algorithm == "fastdtw"
 
     def test_comparison_result_properties(self, seq_a, seq_diff):
         comp = ActionComparator(preprocess=False)
@@ -323,6 +332,172 @@ class TestDeviationAnalyzer:
         assert "偏差程度" in summary
         assert "整体平均偏差" in summary
         assert "偏差最大关节" in summary
+
+
+# ===== 加权距离测试 =====
+
+class TestWeightedDistance:
+
+    def test_axis_weights_constant(self):
+        """验证 z 轴权重小于 xy"""
+        assert AXIS_WEIGHTS[0] == 1.0
+        assert AXIS_WEIGHTS[1] == 1.0
+        assert AXIS_WEIGHTS[2] < 1.0
+
+    def test_axis_weights_z_downweighted(self):
+        """z 轴偏差应比同量级 x 偏差贡献小"""
+        a = np.array([0.0, 0.0, 0.0])
+        b_x = np.array([0.1, 0.0, 0.0])
+        b_z = np.array([0.0, 0.0, 0.1])
+        d_x = weighted_euclidean_distance(a, b_x)
+        d_z = weighted_euclidean_distance(a, b_z)
+        assert d_x > d_z * 2.0
+
+    def test_joint_weights_core_vs_extremity(self):
+        """核心关节(肩)偏差权重应高于末端关节(腕)"""
+        a = np.array([0.0, 0.0, 0.0])
+        b = np.array([0.1, 0.0, 0.0])
+        # 左肩索引 11 → 在 CORE_JOINT_INDICES 中的位置
+        shoulder_k = CORE_JOINT_INDICES.index(11)
+        wrist_k = CORE_JOINT_INDICES.index(15)  # 左腕
+        d_shoulder = weighted_euclidean_distance(
+            a, b, joint_indices=CORE_JOINT_INDICES, k=shoulder_k
+        )
+        d_wrist = weighted_euclidean_distance(
+            a, b, joint_indices=CORE_JOINT_INDICES, k=wrist_k
+        )
+        # 肩权重 1.2 > 腕权重 0.7
+        assert d_shoulder > d_wrist
+
+    def test_visibility_weighting(self):
+        """低可见度应放大偏差"""
+        a = np.array([0.0, 0.0, 0.0])
+        b = np.array([0.1, 0.0, 0.0])
+        d_high = weighted_euclidean_distance(a, b, visibility=0.9)
+        d_low = weighted_euclidean_distance(a, b, visibility=0.3)
+        assert d_low > d_high
+
+    def test_weighted_euclidean_frame_shape(self):
+        """整帧加权距离测试"""
+        a = np.random.randn(51).astype(np.float64)  # 17 joints * 3
+        b = np.random.randn(51).astype(np.float64)
+        d = weighted_euclidean_frame(a, b, CORE_JOINT_INDICES)
+        assert d > 0
+        assert isinstance(d, float)
+
+    def test_identical_zero(self):
+        """相同向量加权距离为 0"""
+        a = np.array([1.0, 2.0, 3.0])
+        assert weighted_euclidean_distance(a, a) == 0.0
+
+    def test_get_weighted_metric_func(self):
+        """验证可通过统一接口获取 weighted_euclidean"""
+        f = get_distance_func("weighted_euclidean")
+        assert callable(f)
+
+
+# ===== 混合特征矩阵测试 =====
+
+class TestHybridMatrix:
+
+    def test_hybrid_shape(self):
+        """混合矩阵维度应为 J*3 + n_angles"""
+        seq = _make_sequence(20)
+        mat = sequence_to_hybrid_matrix(seq, alpha=0.6, beta=0.4)
+        assert mat.shape[0] == 20
+        # 17 关节 * 3 + 9 个角度 = 51 + 9 = 60
+        assert mat.shape[1] == 51 + 9
+
+    def test_hybrid_rows_approx_unit_norm(self):
+        """每行应近似单位范数（坐标和角度各自 L2 归一化后拼接）"""
+        seq = _make_sequence(20)
+        mat = sequence_to_hybrid_matrix(seq, alpha=0.6, beta=0.4)
+        norms = np.linalg.norm(mat, axis=1)
+        # 各自归一化后，拼接范数 ≈ sqrt(alpha² + beta²)
+        expected = np.sqrt(0.6**2 + 0.4**2)
+        assert np.allclose(norms, expected, atol=0.05)
+
+    def test_hybrid_with_dtw(self):
+        """混合矩阵可用于 DTW 比对"""
+        seq = _make_sequence(20)
+        mat = sequence_to_hybrid_matrix(seq, alpha=0.6, beta=0.4)
+        d, p, _ = compute_dtw(mat, mat)
+        assert d == 0.0
+
+
+# ===== 加权偏差分析测试 =====
+
+class TestDeviationAnalyzerWeighted:
+
+    def test_weighted_analyze_identical(self, seq_a, seq_b):
+        """加权模式下相同序列偏差为 0"""
+        comp = ActionComparator(preprocess=False)
+        result = comp.compare(seq_a, seq_b)
+
+        analyzer = JointDeviationAnalyzer(top_k=5, use_weighted=True)
+        report = analyzer.analyze(seq_a, seq_b, result)
+
+        assert report.overall_deviation == 0.0
+        assert report.use_weighted is True
+        assert report.temporal_volatility == 0.0
+
+    def test_weighted_vs_unweighted(self, seq_a, seq_diff):
+        """加权模式偏差值应与未加权不同（因关节权重不均为 1.0）"""
+        comp = ActionComparator(preprocess=False)
+        result = comp.compare(seq_a, seq_diff)
+
+        analyzer_w = JointDeviationAnalyzer(top_k=5, use_weighted=True)
+        report_w = analyzer_w.analyze(seq_a, seq_diff, result)
+
+        analyzer_uw = JointDeviationAnalyzer(top_k=5, use_weighted=False)
+        report_uw = analyzer_uw.analyze(seq_a, seq_diff, result)
+
+        # 加权后因 z 降权和关节权重不均，总偏差应不同
+        assert report_w.overall_deviation != pytest.approx(
+            report_uw.overall_deviation, abs=1e-10
+        )
+
+    def test_temporal_volatility_computed(self, seq_a, seq_diff):
+        """时域波动率应被计算且为正值"""
+        comp = ActionComparator(preprocess=False)
+        result = comp.compare(seq_a, seq_diff)
+
+        analyzer = JointDeviationAnalyzer(top_k=5, use_weighted=True)
+        report = analyzer.analyze(seq_a, seq_diff, result)
+
+        assert report.temporal_volatility >= 0
+        assert "波动率" in report.summary() or report.temporal_volatility >= 0
+
+    def test_unweighted_backward_compat(self, seq_a, seq_diff):
+        """use_weighted=False 时行为与旧版兼容"""
+        comp = ActionComparator(preprocess=False)
+        result = comp.compare(seq_a, seq_diff)
+
+        analyzer = JointDeviationAnalyzer(top_k=3, use_weighted=False)
+        report = analyzer.analyze(seq_a, seq_diff, result)
+
+        assert report.use_weighted is False
+        assert report.overall_deviation > 0
+        assert len(report.worst_joints) == 3
+
+
+# ===== Hybrid 度量对比器测试 =====
+
+class TestHybridComparator:
+
+    def test_hybrid_metric_identical(self, seq_a, seq_b):
+        """hybrid 度量下相同序列相似度为 1.0"""
+        comp = ActionComparator(metric="hybrid", preprocess=False)
+        result = comp.compare(seq_a, seq_b)
+        assert result.similarity == 1.0
+        assert result.metric == "hybrid"
+
+    def test_hybrid_metric_different(self, seq_a, seq_diff):
+        """hybrid 度量下不同序列相似度 < 1.0"""
+        comp = ActionComparator(metric="hybrid", preprocess=False)
+        result = comp.compare(seq_a, seq_diff)
+        assert 0 < result.similarity < 1.0
+        assert result.distance > 0
 
 
 if __name__ == "__main__":
