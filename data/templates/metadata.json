@@ -1,10 +1,5 @@
 {
   "actions": {
-    "squat": {
-      "display_name": "深蹲",
-      "description": "",
-      "template_count": 1
-    },
     "arm_raise": {
       "display_name": "手臂举起",
       "description": "",
@@ -57,6 +52,51 @@
     },
     "test_realtime": {
       "display_name": "test_realtime",
+      "description": "",
+      "template_count": 1
+    },
+    "jump1": {
+      "display_name": "jump1",
+      "description": "",
+      "template_count": 1
+    },
+    "jump2": {
+      "display_name": "jump2",
+      "description": "",
+      "template_count": 2
+    },
+    "jump3": {
+      "display_name": "jump3",
+      "description": "",
+      "template_count": 1
+    },
+    "clap1": {
+      "display_name": "clap1",
+      "description": "",
+      "template_count": 1
+    },
+    "clap2": {
+      "display_name": "clap2",
+      "description": "",
+      "template_count": 1
+    },
+    "clap3": {
+      "display_name": "clap3",
+      "description": "",
+      "template_count": 1
+    },
+    "pick1": {
+      "display_name": "pick1",
+      "description": "",
+      "template_count": 1
+    },
+    "pick2": {
+      "display_name": "pick2",
+      "description": "",
+      "template_count": 1
+    },
+    "test_handUpAndDown": {
+      "display_name": "test_handUpAndDown",
       "description": "",
       "template_count": 1
     }

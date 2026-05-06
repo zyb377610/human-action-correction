@@ -303,10 +303,43 @@ class AppPipeline:
             是否成功
         """
         try:
-            with FileSource(video_path) as source:
-                sequence = self._estimator.estimate_video(
-                    source, max_frames=MAX_FRAMES, show_progress=False
-                )
+            # 使用 LIVE_STREAM 模式 + EMA 平滑，获得更稳定的骨骼序列
+            # 相比 IMAGE 模式逐帧独立检测，LIVE_STREAM 利用 MediaPipe 内置跨帧
+            # 时序追踪，显著减少逐帧抖动和丢检；PoseSmoother 在此基础上再做一层
+            # 按可见度加权的 EMA 微平滑，与摄像头实时链路保持一致。
+            streamer = StreamingPoseEstimator()
+            smoother = PoseSmoother(
+                alpha=0.80, min_alpha_floor=0.55, max_hold_frames=3
+            )
+            sequence = PoseSequence()
+            try:
+                with FileSource(video_path) as source:
+                    sequence.fps = source.fps
+                    frame_idx = 0
+                    while True:
+                        ok, frame = source.read()
+                        if not ok:
+                            break
+                        if frame_idx >= MAX_FRAMES:
+                            break
+
+                        # 毫秒时间戳（必须单调递增，LIVE_STREAM 内部自动保证）
+                        ts_ms = int(frame_idx * 1000.0 / max(source.fps, 1.0))
+                        raw = streamer.process(frame, ts_ms)
+                        smoothed = smoother.update(raw)
+
+                        if smoothed is not None:
+                            pose_frame = self._landmarks_to_poseframe(
+                                smoothed,
+                                frame_index=frame_idx,
+                                timestamp=frame_idx / max(source.fps, 1.0),
+                            )
+                            sequence.add_frame(pose_frame)
+
+                        frame_idx += 1
+            finally:
+                streamer.reset()
+                streamer.close()
 
             if sequence.num_frames < 5:
                 logger.warning(f"视频帧数不足: {sequence.num_frames}")
