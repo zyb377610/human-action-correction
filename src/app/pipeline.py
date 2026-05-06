@@ -29,7 +29,11 @@ from src.correction.realtime_feedback import (
     RealtimeFeedbackEngine,
     FeedbackSnapshot,
 )
-from src.action_comparison.comparison_video import generate_comparison_video
+from src.correction.realtime_visual_feedback import RealtimeVisualFeedback
+from src.action_comparison.comparison_video import (
+    generate_comparison_video,
+    generate_skeleton_comparison_video,
+)
 
 from .data_types import AnalysisResult, ProcessedFrame, TemplateRecordResult
 
@@ -312,6 +316,14 @@ class AppPipeline:
 
         # 实时反馈引擎（在 init_realtime_session 时创建）
         self._realtime_engine: Optional[RealtimeFeedbackEngine] = None
+
+        # 实时视觉反馈增强（持久建议 + 画面叠加 + 降频刷新）
+        self._visual_feedback = RealtimeVisualFeedback(
+            pin_duration=3.0,
+            max_pinned=5,
+            panel_refresh_interval=5,
+            max_history=8,
+        )
 
         # 实时链路轻量 EMA 平滑器（MediaPipe 时序追踪之上的微平滑）
         # alpha 调高（0.80）、hold 调小（3 帧）→ 跟动作更紧
@@ -1082,6 +1094,26 @@ class AppPipeline:
                     )
                 except Exception as e:
                     logger.warning(f"生成对比视频失败: {e}")
+            elif not video_path and report._best_template and report._comparison_result:
+                # 实时模式 / 摄像头录制模式：无原始视频，使用纯骨骼对比视频
+                try:
+                    video_out = self._output_dir / f"skeleton_comparison_{int(time.time())}.mp4"
+                    if progress_callback:
+                        progress_callback(
+                            step_offset + 4, 5,
+                            "正在生成骨骼对比视频…"
+                        )
+                    comparison_video_path = generate_skeleton_comparison_video(
+                        user_sequence=sequence,
+                        template_sequence=report._best_template,
+                        joint_deviations=report.joint_deviations,
+                        output_path=str(video_out),
+                        quality_score=report.quality_score,
+                        corrections=list(report.corrections),
+                        progress_callback=None,
+                    )
+                except Exception as e:
+                    logger.warning(f"生成纯骨骼对比视频失败: {e}")
 
             # 构建结果
             display_name = ACTION_DISPLAY_NAMES.get(
@@ -1239,6 +1271,9 @@ class AppPipeline:
             window_size=10,
         )
 
+        # 重置视觉反馈状态
+        self._visual_feedback.reset()
+
         logger.info(
             f"实时反馈会话初始化: action={action_name}, "
             f"template={template_name}, algorithm={realtime_algo}"
@@ -1252,7 +1287,7 @@ class AppPipeline:
         expected_total_frames: int,
     ) -> tuple:
         """
-        处理实时模式的单帧
+        处理实时模式的单帧（增强版：含视觉高亮 + 持久建议）
 
         Args:
             frame: BGR 图像 (H, W, 3)
@@ -1260,7 +1295,9 @@ class AppPipeline:
             expected_total_frames: 预期总帧数
 
         Returns:
-            (ProcessedFrame, FeedbackSnapshot or None)
+            (ProcessedFrame, panel_markdown_or_None)
+            - ProcessedFrame: 带骨骼叠加 + 视觉高亮的画面
+            - panel_markdown: 面板 Markdown（None 表示本帧不需要更新面板）
         """
         if frame is None or frame.size == 0:
             return ProcessedFrame(annotated_image=frame), None
@@ -1271,7 +1308,9 @@ class AppPipeline:
 
         if landmarks is None:
             empty_snap = FeedbackSnapshot(has_pose=False)
-            return ProcessedFrame(annotated_image=frame.copy()), empty_snap
+            self._visual_feedback.update(empty_snap)
+            panel_md = self._visual_feedback.get_panel_markdown()
+            return ProcessedFrame(annotated_image=frame.copy()), panel_md
 
         # 用平滑后的 landmarks 构造 PoseFrame 绘制
         draw_frame = self._landmarks_to_poseframe(landmarks)
@@ -1287,16 +1326,22 @@ class AppPipeline:
                 expected_total_frames=expected_total_frames,
             )
 
+        # 视觉反馈增强：更新状态 + 画面叠加
+        self._visual_feedback.update(snapshot)
+        annotated = self._visual_feedback.render_overlay(annotated, landmarks)
+        panel_md = self._visual_feedback.get_panel_markdown()
+
         return ProcessedFrame(
             annotated_image=annotated,
             landmarks=landmarks,
-        ), snapshot
+        ), panel_md
 
     def end_realtime_session(self):
         """结束实时反馈会话"""
         if self._realtime_engine is not None:
             self._realtime_engine.reset()
             self._realtime_engine = None
+        self._visual_feedback.reset()
 
     def close(self):
         """释放资源"""

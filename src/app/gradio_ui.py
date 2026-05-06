@@ -218,9 +218,9 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
 
     def on_realtime_frame(frame):
         """
-        实时模式帧处理：
+        实时模式帧处理（增强版）：
         - COUNTDOWN 状态：显示倒计时，不分析
-        - REALTIME 状态：骨骼叠加 + 固定窗口 DTW + 实时建议
+        - REALTIME 状态：骨骼叠加 + 视觉高亮 + 持久建议面板
         - 其他状态：仅骨骼叠加
 
         性能优化：直接用缩小后的图像返回前端，不放大回原尺寸，
@@ -251,12 +251,12 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             )
             return display, status, feedback_md
 
-        # ---- 实时分析状态 ----
+        # ---- 实时分析状态（增强版：视觉高亮 + 持久建议） ----
         if session.is_realtime:
             frame_idx = session.advance_realtime_frame()
             expected_total = 90  # 约 3 秒 @30fps
 
-            processed, snapshot = pipeline.process_realtime_frame(
+            processed, panel_md = pipeline.process_realtime_frame(
                 small, frame_idx, expected_total
             )
 
@@ -268,12 +268,11 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             if processed.has_pose:
                 session.add_frame(processed.landmarks)
 
-            # 更新反馈
-            if snapshot is not None:
-                session.last_feedback = snapshot
-                feedback_md = snapshot.to_markdown()
+            # 更新反馈面板（panel_md 为 None 时保持不变，实现降频刷新）
+            if panel_md is not None:
+                feedback_md = panel_md
             else:
-                feedback_md = "⚠️ 未检测到姿态"
+                feedback_md = gr.update()
 
             frame_count = session.frame_count
             status = f"🟢 实时分析中 — 已采集 {frame_count} 帧"
@@ -288,7 +287,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         return display, gr.update(), gr.update()
 
     def on_stop_realtime(action_choice, algo_label):
-        """停止实时分析，生成总体报告"""
+        """停止实时分析，生成总体报告 + 骨骼对比视频"""
         sequence = session.stop_realtime()
         pipeline.end_realtime_session()
 
@@ -297,6 +296,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             return (
                 "⚠️ 帧数不足（至少 5 帧），请重试",
                 "",
+                None,
                 gr.update(interactive=True),
                 gr.update(interactive=False),
             )
@@ -318,6 +318,7 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
         return (
             "✅ 分析完成 — 总体报告已生成",
             result.report_text,
+            result.comparison_video_path,
             gr.update(interactive=True),
             gr.update(interactive=False),
         )
@@ -497,6 +498,67 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
             mark = "🔴" if dev > 1.3 else ("🟡" if dev >= 0.8 else "🟢")
             lines.append(f"| {mark} {cn} | `{en}` | {dev:.4f} |")
         return "\n".join(lines)
+
+    # -- 实时模式：帧对比查看器（复用视频分析的逻辑） --
+
+    def on_rt_frame_viewer_init():
+        """
+        实时模式分析完成后初始化帧对比查看器。
+        逻辑与视频分析的 on_frame_viewer_init 完全一致。
+        """
+        res = getattr(session, "last_result", None)
+        if res is None or res.report is None:
+            return (
+                gr.update(minimum=0, maximum=0, value=0,
+                          label="对齐步骤（无可用数据）", visible=False),
+                None, "", "", "",
+                gr.update(visible=False),
+            )
+        viewer_state = pipeline.prepare_frame_viewer(res.report)
+        if viewer_state is None:
+            session.frame_viewer_state = None
+            return (
+                gr.update(minimum=0, maximum=0, value=0,
+                          label="对齐步骤（该分析不支持帧对比）", visible=False),
+                None, "", "", "",
+                gr.update(visible=False),
+            )
+        session.frame_viewer_state = viewer_state
+        total = viewer_state["total_user_frames"]
+        # 渲染第一帧
+        data = pipeline.render_viewer_frame(viewer_state, 0)
+        if data is None:
+            return (
+                gr.update(minimum=1, maximum=total, value=1, step=1,
+                          label=f"用户帧（共 {total} 帧）", visible=True),
+                None, "", "", "",
+                gr.update(visible=True),
+            )
+        tbl_md = _joint_table_md(data["joint_table"])
+        advice_md = "\n\n".join(data["advice_lines"])
+        return (
+            gr.update(minimum=1, maximum=total, value=1, step=1,
+                      label=f"用户帧（共 {total} 帧） — 拖动查看动作对比",
+                      visible=True),
+            data["image"], data["step_info"], tbl_md, advice_md,
+            gr.update(visible=True),
+        )
+
+    def on_rt_frame_viewer_render(user_frame_1based):
+        """实时模式帧对比查看器：滑条变化渲染"""
+        viewer_state = getattr(session, "frame_viewer_state", None)
+        if viewer_state is None:
+            return None, "❌ 尚无分析结果", "", ""
+        try:
+            uidx = int(user_frame_1based) - 1
+        except (TypeError, ValueError):
+            uidx = 0
+        data = pipeline.render_viewer_frame(viewer_state, uidx)
+        if data is None:
+            return None, "❌ 渲染失败", "", ""
+        tbl_md = _joint_table_md(data["joint_table"])
+        advice_md = "\n\n".join(data["advice_lines"])
+        return data["image"], data["step_info"], tbl_md, advice_md
 
     def on_delete_template(action_name, template_name):
         """执行删除"""
@@ -857,8 +919,10 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 "**流程**: ① 点击摄像头区域开启摄像头 → "
                 "② 选择动作和算法 → ③ 点击「开始跟做」→ "
                 "3 秒倒计时 → 跟做动作（右侧实时显示建议）→ "
-                "④ 点击「结束」→ 查看总体报告\n\n"
-                "> ⚠️ **请先点击摄像头区域的录制按钮，看到画面后再点「开始跟做」**"
+                "④ 点击「结束」→ 查看总体报告 + 骨骼对比视频 + 帧对比查看器\n\n"
+                "> ⚠️ **请先点击摄像头区域的录制按钮，看到画面后再点「开始跟做」**\n\n"
+                "> 💡 **增强反馈**：画面上会直接用彩色圆圈和箭头标注偏差关节；"
+                "右侧建议面板持久显示（3秒内不消失），避免信息闪过太快"
             )
 
             with gr.Row():
@@ -923,6 +987,42 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                         lines=12,
                         interactive=False,
                     )
+                    rt_comparison_video = gr.Video(
+                        label="🎬 骨骼对比视频（左：您的动作 🟢🟡🔴 | 右：标准模板）",
+                        height=360,
+                    )
+
+            # ===== 实时模式帧对比查看器 =====
+            with gr.Group(visible=False) as rt_frame_viewer_group:
+                gr.Markdown("### 🔍 帧对比查看器 — 拖动滑条查看每一帧的差异")
+                gr.Markdown(
+                    "> 左侧为您的动作骨骼，右侧为模板骨骼。"
+                    "红圈表示该帧偏差较大的关节。"
+                    "下方会列出该帧的逐关节偏差以及针对性建议。"
+                )
+                with gr.Row():
+                    rt_frame_viewer_slider = gr.Slider(
+                        minimum=0, maximum=0, value=0, step=1,
+                        label="对齐步骤",
+                        interactive=True,
+                        visible=False,
+                    )
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        rt_frame_viewer_image = gr.Image(
+                            label="🦴 并排骨骼对比",
+                            type="numpy",
+                            interactive=False,
+                            height=400,
+                        )
+                        rt_frame_viewer_info = gr.Markdown("")
+                    with gr.Column(scale=1):
+                        rt_frame_viewer_table = gr.Markdown(
+                            "当前帧的关节偏差表会显示在这里。"
+                        )
+                        rt_frame_viewer_advice = gr.Markdown(
+                            "", label="针对该帧的建议",
+                        )
 
             # 实时流处理
             rt_cam_input.stream(
@@ -947,8 +1047,30 @@ def create_gradio_app(pipeline: AppPipeline) -> gr.Blocks:
                 outputs=[
                     rt_status,
                     rt_report,
+                    rt_comparison_video,
                     rt_start_btn, rt_stop_btn,
                 ],
+            ).then(
+                fn=on_rt_frame_viewer_init,
+                outputs=[
+                    rt_frame_viewer_slider,
+                    rt_frame_viewer_image,
+                    rt_frame_viewer_info,
+                    rt_frame_viewer_table,
+                    rt_frame_viewer_advice,
+                    rt_frame_viewer_group,
+                ],
+            )
+
+            # 实时模式帧对比滑条拖动
+            rt_frame_viewer_slider.change(
+                fn=on_rt_frame_viewer_render,
+                inputs=[rt_frame_viewer_slider],
+                outputs=[
+                    rt_frame_viewer_image, rt_frame_viewer_info,
+                    rt_frame_viewer_table, rt_frame_viewer_advice,
+                ],
+                show_progress="hidden",
             )
 
         # ============================================================

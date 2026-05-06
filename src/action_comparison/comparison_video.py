@@ -410,6 +410,195 @@ def generate_comparison_video(
     return str(output_path)
 
 
+def generate_skeleton_comparison_video(
+    user_sequence: PoseSequence,
+    template_sequence: PoseSequence,
+    joint_deviations: Dict[str, float],
+    output_path: str,
+    fps: float = _DEFAULT_FPS,
+    quality_score: float = 0.0,
+    corrections: Optional[List] = None,
+    progress_callback=None,
+    canvas_w: int = 480,
+    canvas_h: int = 640,
+) -> Optional[str]:
+    """
+    生成纯骨骼对比视频（不需要原始视频文件）
+
+    用于实时模式结束后生成对比视频：
+    - 左侧：用户骨骼动画（按偏差着色）
+    - 右侧：模板骨架动画（DTW 对齐驱动）
+
+    与 generate_comparison_video 的区别：
+    - 无需 video_path，左侧也用纯骨骼渲染
+    - 用户帧直接遍历 PoseSequence（而非匹配视频 frame_index）
+
+    Args:
+        user_sequence: 用户 PoseSequence
+        template_sequence: 模板 PoseSequence
+        joint_deviations: 关节偏差 {name: deviation}
+        output_path: 输出 MP4 路径
+        fps: 输出帧率
+        quality_score: 质量评分 [0, 100]
+        corrections: 矫正建议列表
+        progress_callback: fn(current, total)
+        canvas_w: 单侧画幅宽度
+        canvas_h: 单侧画幅高度
+
+    Returns:
+        输出视频路径，失败返回 None
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    user_n = user_sequence.num_frames
+    tpl_n = template_sequence.num_frames
+
+    if user_n < 3 or tpl_n < 3:
+        logger.warning("帧数不足，无法生成对比视频")
+        return None
+
+    # ---- 1. 构建 DTW 帧映射 ----
+    dtw_frame_map, match_start, match_end = _build_direct_dtw_map(
+        user_sequence, template_sequence
+    )
+
+    # ---- 2. 准备模板骨骼数据 ----
+    tpl_landmarks_list: List[List[Tuple[float, float, float, float]]] = []
+    for frame in template_sequence.frames:
+        lm_data = []
+        for lm in frame.landmarks:
+            lm_data.append((lm.x, lm.y, lm.z, lm.visibility))
+        tpl_landmarks_list.append(lm_data)
+    tpl_total = len(tpl_landmarks_list)
+
+    # ---- 3. 偏差颜色映射 ----
+    joint_deviation_map = _build_deviation_map(joint_deviations)
+
+    # ---- 4. 矫正建议 ----
+    correction_lines: List[str] = []
+    if corrections:
+        for c in corrections[:8]:
+            if hasattr(c, 'joint_display_name') and hasattr(c, 'advice'):
+                correction_lines.append(f"{c.joint_display_name}: {c.advice}")
+            elif hasattr(c, 'description'):
+                correction_lines.append(str(c.description))
+
+    # ---- 5. 输出布局 ----
+    info_bar_h = int(canvas_h * 0.16)
+    output_w = canvas_w * 2
+    output_h = canvas_h + info_bar_h
+
+    # ---- 6. 创建视频写入器 ----
+    fourcc = cv2.VideoWriter_fourcc(*_DEFAULT_CODEC)
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (output_w, output_h))
+    if not writer.isOpened():
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(output_path), fourcc, fps, (output_w, output_h))
+        if not writer.isOpened():
+            logger.error(f"无法创建输出视频: {output_path}")
+            return None
+
+    # ---- 7. 逐帧生成 ----
+    written = 0
+    last_tpl_idx = 0
+    step = max(1, user_n // 100)
+
+    for seq_idx in range(user_n):
+        canvas = np.full((output_h, output_w, 3), COLOR_BG, dtype=np.uint8)
+
+        # ============ 左半：用户骨骼（偏差着色） ============
+        canvas[:canvas_h, :canvas_w] = COLOR_PANEL_BG
+        user_frame = user_sequence.frames[seq_idx]
+        _draw_skeleton_on_region(
+            canvas, user_frame, 0, 0, canvas_w, canvas_h,
+            joint_deviation_map, is_template=False,
+        )
+        cv2.putText(canvas, "Your Action", (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_WHITE, 2)
+        # 用户帧号
+        user_text = f"{seq_idx + 1}/{user_n}"
+        cv2.putText(canvas, user_text, (8, canvas_h - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_GRAY, 1)
+
+        # ============ 右半：模板骨架（DTW 对齐驱动） ============
+        canvas[:canvas_h, canvas_w:output_w] = COLOR_PANEL_BG
+
+        # 三阶段同步逻辑
+        if dtw_frame_map:
+            if seq_idx < match_start:
+                tpl_idx = 0
+                phase_label = "Ready"
+                phase_color = (120, 120, 120)
+            elif seq_idx > match_end:
+                tpl_idx = tpl_total - 1
+                phase_label = "Done"
+                phase_color = (100, 180, 100)
+            else:
+                if seq_idx in dtw_frame_map:
+                    tpl_idx = dtw_frame_map[seq_idx]
+                else:
+                    all_keys = sorted(dtw_frame_map.keys())
+                    if all_keys:
+                        nearest = min(all_keys, key=lambda k: abs(k - seq_idx))
+                        tpl_idx = dtw_frame_map[nearest]
+                    else:
+                        tpl_idx = last_tpl_idx
+                tpl_idx = max(0, min(tpl_idx, tpl_total - 1))
+                phase_label = "Synced"
+                phase_color = (255, 180, 60)
+        else:
+            # 无 DTW 映射 → 线性
+            progress = seq_idx / max(user_n - 1, 1)
+            tpl_idx = int(progress * (tpl_total - 1))
+            tpl_idx = max(0, min(tpl_idx, tpl_total - 1))
+            phase_label = "Linear"
+            phase_color = (180, 140, 60)
+
+        last_tpl_idx = tpl_idx
+
+        _draw_skeleton_on_region(
+            canvas, None, canvas_w, 0, canvas_w, canvas_h,
+            joint_deviation_map=None, is_template=True,
+            tpl_landmarks=tpl_landmarks_list[tpl_idx],
+        )
+
+        cv2.putText(canvas, f"Template [{phase_label}]", (canvas_w + 8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, phase_color, 2)
+        tpl_text = f"{tpl_idx + 1}/{tpl_total}"
+        (tw, _), _ = cv2.getTextSize(tpl_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+        cv2.putText(canvas, tpl_text,
+                    (output_w - tw - 8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_GRAY, 1)
+
+        # ============ 中间分隔线 ============
+        cv2.line(canvas, (canvas_w, 0), (canvas_w, canvas_h), COLOR_DIVIDER, 2)
+
+        # ============ 底部信息栏 ============
+        _draw_info_bar(
+            canvas, canvas_h, output_w, output_h,
+            user_idx=seq_idx, total_frames=user_n,
+            quality_score=quality_score,
+            joint_deviations=joint_deviations,
+            correction_lines=correction_lines,
+            joint_deviation_map=joint_deviation_map,
+        )
+
+        writer.write(canvas)
+        written += 1
+
+        if progress_callback and seq_idx % step == 0:
+            progress_callback(seq_idx + 1, user_n)
+
+    writer.release()
+
+    logger.info(
+        f"骨骼对比视频已生成: {output_path} ({written} 帧, {output_w}x{output_h}), "
+        f"DTW匹配段: [{match_start}..{match_end}], 模板{tpl_total}帧"
+    )
+    return str(output_path)
+
+
 def _detect_action_range(
     user_sequence: PoseSequence,
     total_video_frames: int,
