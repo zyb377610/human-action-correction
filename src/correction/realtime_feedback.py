@@ -23,9 +23,14 @@ from src.action_comparison.distance_metrics import (
     sequence_to_feature_matrix,
     get_distance_func,
     CORE_JOINT_INDICES,
+    CORE_JOINT_NAMES,
+    weighted_euclidean_distance,
+    AXIS_WEIGHTS,
+    JOINT_IMPORTANCE_WEIGHTS,
 )
 from src.action_comparison.dtw_algorithms import compute_dtw
 from src.correction.angle_utils import AngleCalculator
+from src.pose_estimation.data_types import LANDMARK_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -75,17 +80,21 @@ class FeedbackItem:
     Attributes:
         joint_name: 关节名称（如 "left_knee"）
         joint_display: 关节中文名称（如 "左膝"）
-        deviation_deg: 角度偏差（度）
-        direction: 偏差方向描述（如 "角度过小"）
+        deviation_deg: 角度偏差（度），source="angle" 时有效
+        deviation_spatial: 空间坐标偏差（归一化单位），source="spatial" 时有效
+        direction: 偏差方向描述（如 "角度过小" / "位置偏右"）
         advice: 矫正提示文字（如 "请将膝盖向外展开"）
         severity: 严重等级
+        source: 偏差来源 — "angle"（角度）或 "spatial"（空间坐标）
     """
     joint_name: str = ""
     joint_display: str = ""
     deviation_deg: float = 0.0
+    deviation_spatial: float = 0.0
     direction: str = ""
     advice: str = ""
     severity: Severity = Severity.INFO
+    source: str = "angle"
 
 
 @dataclass
@@ -94,12 +103,14 @@ class FeedbackSnapshot:
     单帧的实时反馈快照
 
     Attributes:
-        items: 矫正建议列表
+        items: 矫正建议列表（角度 + 空间合并）
         has_pose: 是否检测到人体姿态
         window_similarity: 固定窗口 DTW 相似度 [0, 1]
         frame_index: 当前帧索引
         timestamp: 时间戳（秒）
         buffer_size: 当前帧缓冲区大小
+        dtw_aligned_template_frame: DTW 对齐后的模板帧索引（-1 表示未计算）
+        spatial_deviation_overall: 空间坐标整体平均偏差（归一化单位，-1 表示未计算）
     """
     items: List[FeedbackItem] = field(default_factory=list)
     has_pose: bool = False
@@ -107,6 +118,8 @@ class FeedbackSnapshot:
     frame_index: int = 0
     timestamp: float = 0.0
     buffer_size: int = 0
+    dtw_aligned_template_frame: int = -1
+    spatial_deviation_overall: float = -1.0
 
     @property
     def num_issues(self) -> int:
@@ -131,8 +144,17 @@ class FeedbackSnapshot:
             f"**窗口相似度**: {self.window_similarity:.0%}　"
             f"**帧**: {self.frame_index}　"
             f"**缓冲**: {self.buffer_size}",
-            "",
         ]
+        if self.dtw_aligned_template_frame >= 0:
+            lines.append(
+                f"**DTW对齐模板帧**: {self.dtw_aligned_template_frame}"
+            )
+        if self.spatial_deviation_overall >= 0:
+            level = ("轻微" if self.spatial_deviation_overall < 0.08
+                     else "中等" if self.spatial_deviation_overall < 0.18
+                     else "较大")
+            lines.append(f"**空间偏差**: {self.spatial_deviation_overall:.3f} ({level})")
+        lines.append("")
 
         if not self.has_issues:
             lines.append("✅ **姿态正确，继续保持！**")
@@ -143,10 +165,16 @@ class FeedbackSnapshot:
                     Severity.WARNING: "🟡",
                     Severity.INFO: "🟢",
                 }.get(item.severity, "⚪")
-                lines.append(
-                    f"{icon} **{item.joint_display}** — "
-                    f"{item.advice}（偏差 {item.deviation_deg:.0f}°）"
-                )
+                if item.source == "spatial":
+                    lines.append(
+                        f"{icon} 📍 **{item.joint_display}** — "
+                        f"{item.advice}（偏移 {item.deviation_spatial:.3f}）"
+                    )
+                else:
+                    lines.append(
+                        f"{icon} **{item.joint_display}** — "
+                        f"{item.advice}（偏差 {item.deviation_deg:.0f}°）"
+                    )
 
         return "\n".join(lines)
 
@@ -203,6 +231,7 @@ class RealtimeFeedbackEngine:
         algorithm: str = "fastdtw",
         window_size: int = 10,
         angle_threshold: float = 15.0,
+        spatial_threshold: float = 0.06,
         dedup_interval: float = 2.0,
     ):
         """
@@ -211,6 +240,7 @@ class RealtimeFeedbackEngine:
             algorithm: DTW 算法名称 (dtw / fastdtw / ddtw)
             window_size: 固定窗口大小（帧数）
             angle_threshold: 角度偏差阈值（度），低于阈值不报告
+            spatial_threshold: 空间坐标偏差阈值（归一化单位），低于阈值不报告
             dedup_interval: 建议去重间隔（秒），同一建议在此间隔内不重复
         """
         # 对模板也进行骨骼过滤和片段提取（确保模板干净）
@@ -222,6 +252,7 @@ class RealtimeFeedbackEngine:
         self._algorithm = algorithm
         self._window_size = window_size
         self._angle_threshold = angle_threshold
+        self._spatial_threshold = spatial_threshold
         self._dedup_interval = dedup_interval
 
         # 帧缓冲区
@@ -324,7 +355,7 @@ class RealtimeFeedbackEngine:
         self._frame_count += 1
         now = time.time()
 
-        # ======== 骨骼一致性检测（方案B：实时模式适配） ========
+        # ======== 骨骼一致性检测 ========
         if not self._check_skeleton_consistency(landmarks):
             logger.debug(f"帧 {frame_index} 骨骼突变，跳过分析")
             return FeedbackSnapshot(
@@ -334,7 +365,6 @@ class RealtimeFeedbackEngine:
                 timestamp=now,
                 buffer_size=len(self._frame_buffer),
             )
-        # =====================================================
 
         # 缓存当前帧
         self._frame_buffer.append(landmarks.copy())
@@ -343,31 +373,70 @@ class RealtimeFeedbackEngine:
         # 1. 计算当前帧角度
         user_angles = self._angle_calc.compute_frame_angles(landmarks)
 
-        # 2. 映射模板对应进度的帧
-        template_center = self._map_progress(
-            frame_index, expected_total_frames
-        )
-        template_angles = self._get_template_frame_angles(template_center)
-
-        # 3. 固定窗口 DTW（如果缓冲区足够）
+        # 2. 固定窗口 DTW（如果缓冲区足够）
         window_similarity = 0.0
-        if buffer_size >= 3:  # 至少 3 帧才做窗口 DTW
-            window_similarity = self._compute_window_dtw(
+        dtw_path = []
+        template_window = np.zeros((0, 33, 4))
+        aligned_template_idx = -1
+        spatial_items: List[FeedbackItem] = []
+        spatial_overall = -1.0
+
+        if buffer_size >= 3:
+            window_similarity, dtw_path, user_win, template_window = \
+                self._compute_window_dtw(frame_index, expected_total_frames)
+
+            # === 从 DTW 路径中提取当前帧的对齐模板帧 ===
+            if dtw_path and user_win.shape[0] > 0 and template_window.shape[0] > 0:
+                # 用户窗口的最后一帧索引 = user_win.shape[0] - 1
+                user_last = user_win.shape[0] - 1
+                # 查找 DTW 路径中所有 user_idx == user_last 的配对
+                aligned_tmpl_indices = [
+                    j for i, j in dtw_path if i == user_last
+                ]
+                if aligned_tmpl_indices:
+                    # 取中位数（多数投票）
+                    aligned_template_idx = int(np.median(aligned_tmpl_indices))
+                    # 防御越界
+                    aligned_template_idx = min(
+                        aligned_template_idx, template_window.shape[0] - 1
+                    )
+
+                    # === 空间坐标偏差检测 ===
+                    template_lm = template_window[aligned_template_idx]  # (33, 4)
+                    spatial_items, spatial_overall = self._detect_spatial_deviations(
+                        landmarks, template_lm, now
+                    )
+
+        # 3. 确定用于角度对比的模板帧
+        #    优先使用 DTW 对齐结果，回退到线性进度映射
+        if aligned_template_idx >= 0 and template_window.shape[0] > aligned_template_idx:
+            template_lm_for_angle = template_window[aligned_template_idx]
+            template_angles = self._angle_calc.compute_frame_angles(
+                template_lm_for_angle
+            )
+        else:
+            template_center = self._map_progress(
                 frame_index, expected_total_frames
             )
+            template_angles = self._get_template_frame_angles(template_center)
 
         # 4. 角度偏差检测 + 建议生成
-        items = self._detect_deviations(
+        angle_items = self._detect_deviations(
             user_angles, template_angles, now
         )
 
+        # 合并角度和空间建议，角度在前（优先级更高）
+        all_items = angle_items + spatial_items
+
         return FeedbackSnapshot(
-            items=items,
+            items=all_items,
             has_pose=True,
             window_similarity=window_similarity,
             frame_index=frame_index,
             timestamp=now,
             buffer_size=buffer_size,
+            dtw_aligned_template_frame=aligned_template_idx,
+            spatial_deviation_overall=spatial_overall,
         )
 
     # ================================================================
@@ -434,16 +503,20 @@ class RealtimeFeedbackEngine:
 
     def _compute_window_dtw(
         self, frame_index: int, expected_total: int
-    ) -> float:
+    ) -> Tuple[float, List, np.ndarray, np.ndarray]:
         """
-        计算固定窗口 DTW 相似度
+        计算固定窗口 DTW 相似度，同时返回对齐路径和原始窗口数据
 
         Args:
             frame_index: 当前帧索引
             expected_total: 预期总帧数
 
         Returns:
-            相似度 [0, 1]
+            (similarity, path, user_window, template_window)
+            - similarity: 相似度 [0, 1]
+            - path: DTW 对齐路径 [(i, j), ...]
+            - user_window: (W, 33, 4) 用户窗口原始关键点
+            - template_window: (W', 33, 4) 模板窗口原始关键点
         """
         # 用户窗口
         user_window = np.stack(list(self._frame_buffer), axis=0)  # (W, 33, 4)
@@ -454,7 +527,7 @@ class RealtimeFeedbackEngine:
 
         # 确保两个窗口至少有 2 帧
         if user_window.shape[0] < 2 or template_window.shape[0] < 2:
-            return 0.0
+            return 0.0, [], user_window, template_window
 
         # 转换为特征矩阵 — 使用角度特征（位置无关）
         user_feat = _window_to_angle_matrix(user_window)
@@ -471,11 +544,147 @@ class RealtimeFeedbackEngine:
             path_len = len(path) if path else 1
             norm_dist = distance / path_len
             similarity = float(np.exp(-(norm_dist ** 2) / (2 * 0.7 ** 2)))
-            return similarity
+            return similarity, path, user_window, template_window
 
         except Exception as e:
             logger.debug(f"窗口 DTW 计算失败: {e}")
-            return 0.0
+            return 0.0, [], user_window, template_window
+
+    def _normalize_landmark_coords(
+        self, lm: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        单帧关键点坐标归一化：髋中心平移 + 躯干尺度缩放
+
+        Args:
+            lm: (33, 4) 单帧关键点 [x, y, z, visibility]
+
+        Returns:
+            (coords, vis)
+            - coords: (J, 3) 归一化后的核心关节 xyz
+            - vis: (J,) 各关节可见度
+        """
+        J = len(CORE_JOINT_INDICES)
+        coords = np.zeros((J, 3), dtype=np.float64)
+        vis_arr = np.ones(J, dtype=np.float64)
+
+        if lm.shape[0] <= 24:
+            return coords, vis_arr
+
+        # 髋中点
+        cx = (lm[23, 0] + lm[24, 0]) / 2.0
+        cy = (lm[23, 1] + lm[24, 1]) / 2.0
+        cz = (lm[23, 2] + lm[24, 2]) / 2.0
+
+        # 肩中点 → 躯干长度
+        sx = (lm[11, 0] + lm[12, 0]) / 2.0
+        sy = (lm[11, 1] + lm[12, 1]) / 2.0
+        sz = (lm[11, 2] + lm[12, 2]) / 2.0
+        torso = np.sqrt((sx - cx) ** 2 + (sy - cy) ** 2 + (sz - cz) ** 2)
+        if torso < 1e-3:
+            torso = 1.0
+
+        for k, j in enumerate(CORE_JOINT_INDICES):
+            if j < lm.shape[0]:
+                coords[k, 0] = (lm[j, 0] - cx) / torso
+                coords[k, 1] = (lm[j, 1] - cy) / torso
+                coords[k, 2] = (lm[j, 2] - cz) / torso
+                vis_arr[k] = float(lm[j, 3])
+
+        return coords, vis_arr
+
+    def _detect_spatial_deviations(
+        self,
+        user_lm: np.ndarray,
+        template_lm: np.ndarray,
+        now: float,
+    ) -> Tuple[List[FeedbackItem], float]:
+        """
+        检测空间坐标偏差并生成矫正建议
+
+        使用加权欧氏距离：轴加权 + 关节重要性 + 可见度。
+
+        Args:
+            user_lm: (33, 4) 用户当前帧关键点
+            template_lm: (33, 4) DTW 对齐的模板帧关键点
+            now: 当前时间戳
+
+        Returns:
+            (items, overall_deviation)
+            - items: 空间矫正建议列表
+            - overall_deviation: 整体平均偏差
+        """
+        u_coords, u_vis = self._normalize_landmark_coords(user_lm)
+        t_coords, t_vis = self._normalize_landmark_coords(template_lm)
+
+        J = len(CORE_JOINT_INDICES)
+        deviations = np.zeros(J, dtype=np.float64)
+
+        for k in range(J):
+            deviations[k] = weighted_euclidean_distance(
+                u_coords[k], t_coords[k],
+                joint_indices=CORE_JOINT_INDICES,
+                k=k,
+                visibility=float(u_vis[k]),
+            )
+
+        overall = float(np.mean(deviations))
+
+        # 生成建议：取偏差最大的 top-3 关节
+        sorted_idx = np.argsort(deviations)[::-1]
+        items = []
+
+        for rank, k in enumerate(sorted_idx[:3]):
+            dev = float(deviations[k])
+            if dev < self._spatial_threshold:
+                continue
+
+            joint_idx = CORE_JOINT_INDICES[k]
+            en_name = (
+                LANDMARK_NAMES[joint_idx]
+                if 0 <= joint_idx < len(LANDMARK_NAMES)
+                else f"joint_{joint_idx}"
+            )
+            cn_name = CORE_JOINT_NAMES.get(joint_idx, en_name)
+
+            # 去重检查
+            dedup_key = f"spatial_{en_name}"
+            last_shown = self._dedup_cache.get(dedup_key, 0.0)
+            if (now - last_shown) < self._dedup_interval:
+                continue
+
+            # 方向判断（用户关节相对于模板的位置）
+            u_xyz = u_coords[k]
+            t_xyz = t_coords[k]
+            diff = u_xyz - t_xyz
+            max_axis = np.argmax(np.abs(diff))
+            axis_names = ["X", "Y", "Z"]
+            dir_str = (
+                f"位置{'偏高' if diff[max_axis] > 0 else '偏低'}"
+                f"({axis_names[max_axis]}轴)"
+            )
+
+            # 严重等级
+            if dev > 0.25:
+                severity = Severity.ERROR
+            elif dev > 0.15:
+                severity = Severity.WARNING
+            else:
+                severity = Severity.INFO
+
+            items.append(FeedbackItem(
+                joint_name=en_name,
+                joint_display=cn_name,
+                deviation_spatial=dev,
+                direction=dir_str,
+                advice=f"{cn_name}位置偏差较大，请调整姿态",
+                severity=severity,
+                source="spatial",
+            ))
+
+            self._dedup_cache[dedup_key] = now
+
+        return items, overall
 
     def _detect_deviations(
         self,
